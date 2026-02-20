@@ -15,31 +15,37 @@ const PORT = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
 
 // ---- FIREBASE ADMIN (para verificar tokens de Google Auth) ----
-// Usamos las credenciales como variables de entorno en Railway
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId:   process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey:  process.env.FIREBASE_PRIVATE_KEY
-      ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
-      : undefined
-  })
-});
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId:   process.env.FIREBASE_PROJECT_ID   || "therianworl",
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL || "",
+      privateKey:  process.env.FIREBASE_PRIVATE_KEY
+        ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+        : ""
+    })
+  });
+  console.log("✅ Firebase Admin inicializado");
+} catch (err) {
+  console.warn("⚠️  Firebase Admin error (configura FIREBASE_CLIENT_EMAIL y FIREBASE_PRIVATE_KEY):", err.message);
+}
 
 // ---- POSTGRESQL ----
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL
-    ? { rejectUnauthorized: false }
-    : false
+  connectionString: process.env.DATABASE_URL || "",
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
 // Test de conexión al inicio
-pool.query("SELECT 1").then(() => {
-  console.log("✅ PostgreSQL conectado");
-}).catch(err => {
-  console.error("❌ Error PostgreSQL:", err.message);
-});
+if (process.env.DATABASE_URL) {
+  pool.query("SELECT 1").then(() => {
+    console.log("✅ PostgreSQL conectado");
+  }).catch(err => {
+    console.error("❌ Error PostgreSQL:", err.message);
+  });
+} else {
+  console.warn("⚠️  DATABASE_URL no configurada — agrega PostgreSQL en Railway");
+}
 
 // ---- EXPRESS ----
 const app    = express();
