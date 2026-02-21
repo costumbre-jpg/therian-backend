@@ -43,6 +43,17 @@ app.use(express.json({ limit: "5mb" }));
 
 app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
 
+// ---- DIAGNÓSTICO TEMPORAL ----
+app.get("/api/debug-env", (req, res) => {
+  res.json({
+    has_google_client_id: !!process.env.GOOGLE_CLIENT_ID,
+    google_client_id_length: (process.env.GOOGLE_CLIENT_ID || "").length,
+    has_database_url: !!process.env.DATABASE_URL,
+    has_jwt_secret: !!process.env.JWT_SECRET,
+    node_env: process.env.NODE_ENV || "not set"
+  });
+});
+
 // ---- VERIFICAR TOKEN DE GOOGLE con librería oficial ----
 async function verifyGoogleToken(idToken) {
   const ticket = await googleClient.verifyIdToken({
