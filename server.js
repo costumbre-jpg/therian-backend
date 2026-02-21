@@ -16,6 +16,7 @@ const PORT         = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
 const JWT_SECRET      = process.env.JWT_SECRET      || "therian_secret_change_this_in_production";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const ADMIN_UID        = process.env.ADMIN_UID || "";
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ---- POSTGRESQL ----
@@ -27,6 +28,8 @@ const pool = new Pool({
 if (process.env.DATABASE_URL) {
   pool.query("SELECT 1").then(() => console.log("OK PostgreSQL"))
     .catch(err => console.error("ERROR PostgreSQL:", err.message));
+  // Agregar columna is_banned si no existe
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => {});
 } else {
   console.warn("WARN: DATABASE_URL no configurada");
 }
@@ -80,6 +83,12 @@ function authMiddleware(req, res, next) {
   }
 }
 
+// ---- MIDDLEWARE: solo admin ----
+function adminMiddleware(req, res, next) {
+  if (!ADMIN_UID || req.uid !== ADMIN_UID) return res.status(403).json({ error: "No autorizado" });
+  next();
+}
+
 // ============================================================
 // RUTAS
 // ============================================================
@@ -104,6 +113,9 @@ app.post("/api/auth/google", async (req, res) => {
     );
     const user = rows[0];
 
+    // Bloquear usuarios baneados
+    if (user.is_banned) return res.status(403).json({ error: "Tu cuenta ha sido baneada de Therians." });
+
     // Emitir nuestro propio JWT (valido 30 dias)
     const token = jwt.sign({ uid: user.id }, JWT_SECRET, { expiresIn: "30d" });
     res.json({ token, user });
@@ -118,7 +130,9 @@ app.get("/api/users/me", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [req.uid]);
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
-    res.json(rows[0]);
+    const user = rows[0];
+    user.is_admin = !!(ADMIN_UID && req.uid === ADMIN_UID);
+    res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -209,6 +223,43 @@ app.post("/api/friends/:friendId", authMiddleware, async (req, res) => {
 });
 
 // ============================================================
+// ADMIN: BAN / UNBAN / BORRAR MENSAJE
+// ============================================================
+
+// Banear usuario
+app.post("/api/admin/ban/:uid", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await pool.query("UPDATE users SET is_banned = TRUE WHERE id = $1", [req.params.uid]);
+    // Desconectar su socket si está conectado
+    connectedUsers.forEach((u, socketId) => {
+      if (u.uid === req.params.uid) {
+        io.to(socketId).emit("banned");
+        const s = io.sockets.sockets.get(socketId);
+        if (s) s.disconnect(true);
+      }
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Desbanear usuario
+app.post("/api/admin/unban/:uid", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await pool.query("UPDATE users SET is_banned = FALSE WHERE id = $1", [req.params.uid]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Borrar mensaje de sala
+app.delete("/api/admin/messages/:msgId", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query("DELETE FROM messages WHERE id = $1 RETURNING room_id", [req.params.msgId]);
+    if (rows.length) io.to("room_" + rows[0].room_id).emit("message_deleted", req.params.msgId);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================
 // SOCKET.IO
 // ============================================================
 const connectedUsers = new Map();
@@ -221,6 +272,7 @@ io.on("connection", (socket) => {
       pool.query("SELECT * FROM users WHERE id = $1", [decoded.uid]).then(({ rows }) => {
         if (!rows.length) return socket.emit("auth_error", "Usuario no encontrado");
         const user = rows[0];
+        if (user.is_banned) return socket.emit("banned");
         connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium });
         socket.emit("auth_ok");
         pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => {});
