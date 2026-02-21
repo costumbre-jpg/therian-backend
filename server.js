@@ -52,8 +52,9 @@ function verifyGoogleToken(idToken) {
       res.on("end", () => {
         try {
           const parsed = JSON.parse(data);
-          if (parsed.error_description || !parsed.sub) {
-            reject(new Error(parsed.error_description || "Token invalido"));
+          console.log("Google tokeninfo response:", JSON.stringify(parsed));
+          if (parsed.error || !parsed.sub) {
+            reject(new Error(parsed.error || parsed.error_description || "Token de Google invalido"));
           } else {
             resolve(parsed); // { sub, email, name, picture, ... }
           }
