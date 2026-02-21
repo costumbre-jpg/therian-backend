@@ -53,8 +53,8 @@ function verifyGoogleToken(idToken) {
         try {
           const parsed = JSON.parse(data);
           console.log("Google tokeninfo response:", JSON.stringify(parsed));
-          if (parsed.error || !parsed.sub) {
-            reject(new Error(parsed.error || parsed.error_description || "Token de Google invalido"));
+          if (!parsed.sub) {
+            reject(new Error(parsed.error_description || parsed.error || "Token invalido. Asegurate de que el origen esta autorizado en Google Cloud."));
           } else {
             resolve(parsed); // { sub, email, name, picture, ... }
           }
