@@ -10,11 +10,13 @@ const { Server } = require("socket.io");
 const cors     = require("cors");
 const { Pool } = require("pg");
 const jwt      = require("jsonwebtoken");
-const https    = require("https");
+const { OAuth2Client } = require("google-auth-library");
 
 const PORT         = process.env.PORT || 4000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
-const JWT_SECRET   = process.env.JWT_SECRET   || "therian_secret_change_this_in_production";
+const JWT_SECRET      = process.env.JWT_SECRET      || "therian_secret_change_this_in_production";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ---- POSTGRESQL ----
 const pool = new Pool({
@@ -41,27 +43,15 @@ app.use(express.json({ limit: "5mb" }));
 
 app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
 
-// ---- VERIFICAR TOKEN DE GOOGLE ----
-// Llama a la API de Google para validar el id_token sin Firebase
-function verifyGoogleToken(idToken) {
-  return new Promise((resolve, reject) => {
-    const url = "https://oauth2.googleapis.com/tokeninfo?id_token=" + idToken;
-    https.get(url, (res) => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
-        try {
-          const parsed = JSON.parse(data);
-          console.log("Google tokeninfo response:", JSON.stringify(parsed));
-          if (!parsed.sub) {
-            reject(new Error(parsed.error_description || parsed.error || "Token invalido. Asegurate de que el origen esta autorizado en Google Cloud."));
-          } else {
-            resolve(parsed); // { sub, email, name, picture, ... }
-          }
-        } catch (e) { reject(e); }
-      });
-    }).on("error", reject);
+// ---- VERIFICAR TOKEN DE GOOGLE con librería oficial ----
+async function verifyGoogleToken(idToken) {
+  const ticket = await googleClient.verifyIdToken({
+    idToken,
+    audience: GOOGLE_CLIENT_ID || undefined  // si no hay CLIENT_ID configurado, igual verifica
   });
+  const payload = ticket.getPayload();
+  // payload tiene: sub, email, name, picture
+  return payload;
 }
 
 // ---- MIDDLEWARE: verificar nuestro JWT ----
