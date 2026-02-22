@@ -28,10 +28,59 @@ const pool = new Pool({
 if (process.env.DATABASE_URL) {
   pool.query("SELECT 1").then(() => console.log("OK PostgreSQL"))
     .catch(err => console.error("ERROR PostgreSQL:", err.message));
-  // Agregar columna is_banned si no existe
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => {});
+  pool.query(`CREATE TABLE IF NOT EXISTS reports (
+    id SERIAL PRIMARY KEY,
+    msg_id TEXT,
+    msg_text TEXT,
+    reported_uid TEXT,
+    reported_name TEXT,
+    reporter_uid TEXT,
+    room_id TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    resolved BOOLEAN DEFAULT FALSE
+  )`).catch(() => {});
 } else {
   console.warn("WARN: DATABASE_URL no configurada");
+}
+
+// ---- WORD FILTER ----
+const BAD_WORDS = [
+  // Hate speech / death threats
+  "kill yourself","kys","go die","you should die","i hope you die","mátate","suicídate","espero que te mueras",
+  // Slurs (EN)
+  "faggot","nigger","nigga","retard","retarded",
+  // Slurs (ES)
+  "maricón","maricon","negro de mierda","puto imbécil",
+  // Harassment
+  "rape","pedophile","pedo","violación","violacion",
+  // Extreme insults
+  "go fuck yourself","fuck you","hijo de puta","hdp","me cago en tu madre"
+];
+
+function containsBadWord(text) {
+  const lower = text.toLowerCase();
+  return BAD_WORDS.some(w => lower.includes(w));
+}
+
+async function sendReportEmail(report) {
+  try {
+    await fetch("https://api.web3forms.com/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_key: "9076b9a0-51a2-44af-8ee3-7ba4f9a2b7dd",
+        subject: "\uD83D\uDEA8 Therians — Mensaje reportado",
+        from_name: "Therians Moderacion",
+        message:
+          "Usuario reportado: " + (report.reported_name || report.reported_uid) + "\n" +
+          "ID usuario: " + report.reported_uid + "\n" +
+          "Sala: " + (report.room_id || "DM") + "\n" +
+          "Mensaje: " + report.msg_text + "\n" +
+          "Reportado por: " + report.reporter_uid
+      })
+    });
+  } catch(e) { console.error("Email report error:", e.message); }
 }
 
 // ---- EXPRESS ----
@@ -222,6 +271,31 @@ app.post("/api/friends/:friendId", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ---- REPORTAR MENSAJE ----
+app.post("/api/reports", authMiddleware, async (req, res) => {
+  const { msgId, msgText, reportedUid, reportedName, roomId } = req.body;
+  if (!reportedUid || !msgText) return res.status(400).json({ error: "Datos incompletos" });
+  try {
+    await pool.query(
+      `INSERT INTO reports (msg_id, msg_text, reported_uid, reported_name, reporter_uid, room_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [msgId || null, msgText, reportedUid, reportedName || "", req.uid, roomId || ""]
+    );
+    await sendReportEmail({ msg_text: msgText, reported_uid: reportedUid, reported_name: reportedName, room_id: roomId, reporter_uid: req.uid });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- VER REPORTES (solo admin) ----
+app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM reports ORDER BY created_at DESC LIMIT 100`
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ============================================================
 // ADMIN: BAN / UNBAN / BORRAR MENSAJE
 // ============================================================
@@ -297,6 +371,10 @@ io.on("connection", (socket) => {
   socket.on("send_message", async ({ roomId, text }) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !text || !text.trim() || text.length > 500) return;
+    if (containsBadWord(text.trim())) {
+      socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
+      return;
+    }
     try {
       const { rows } = await pool.query(
         `INSERT INTO messages (room_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *`,
@@ -314,6 +392,10 @@ io.on("connection", (socket) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !text || !text.trim() || text.length > 500) return;
     if (!chatId.split("_").includes(user.uid)) return;
+    if (containsBadWord(text.trim())) {
+      socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
+      return;
+    }
     try {
       const { rows } = await pool.query(
         `INSERT INTO dm_messages (chat_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *`,
