@@ -352,13 +352,45 @@ app.post("/api/reports", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- VER REPORTES (solo admin) ----
+// ---- VER REPORTES (solo admin, con paginacion y filtro) ----
 app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
   try {
+    const status = req.query.status || "pending";
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = 20;
+    const offset = (page - 1) * limit;
+    const resolved = status === "resolved";
+
     const { rows } = await pool.query(
-      `SELECT * FROM reports ORDER BY created_at DESC LIMIT 100`
+      `SELECT r.*, u.photo AS reported_photo
+       FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
+       WHERE r.resolved = $1
+       ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+      [resolved, limit, offset]
     );
-    res.json(rows);
+
+    const countResult = await pool.query(
+      "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
+    );
+    const total = parseInt(countResult.rows[0].count);
+
+    res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- CONTAR REPORTES PENDIENTES (solo admin) ----
+app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT COUNT(*) FROM reports WHERE resolved = FALSE");
+    res.json({ pending: parseInt(rows[0].count) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- RESOLVER/DESCARTAR REPORTE (solo admin) ----
+app.patch("/api/admin/reports/:id", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    await pool.query("UPDATE reports SET resolved = TRUE WHERE id = $1", [req.params.id]);
+    res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
