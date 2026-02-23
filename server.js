@@ -382,6 +382,16 @@ app.post("/api/admin/ban/:uid", authMiddleware, adminMiddleware, async (req, res
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Lista de usuarios baneados
+app.get("/api/admin/banned", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, name, photo, email FROM users WHERE is_banned = TRUE ORDER BY name"
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // Desbanear usuario
 app.post("/api/admin/unban/:uid", authMiddleware, adminMiddleware, async (req, res) => {
   try {
