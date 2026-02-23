@@ -15,7 +15,13 @@ const { OAuth2Client } = require("google-auth-library");
 
 const PORT             = process.env.PORT || 4000;
 const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
-const ALLOWED_ORIGINS  = [FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:5500"];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (origin === FRONTEND_URL) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  return false;
+}
 
 if (!process.env.JWT_SECRET) {
   console.error("FATAL: JWT_SECRET env var is required. Server cannot start without it.");
@@ -94,11 +100,16 @@ async function sendReportEmail(report) {
 // ---- EXPRESS ----
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] }
-});
+const corsConfig = {
+  origin: function(origin, callback) {
+    if (isAllowedOrigin(origin)) callback(null, true);
+    else callback(new Error("CORS not allowed"));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+};
+const io     = new Server(server, { cors: corsConfig });
 
-app.use(cors({ origin: ALLOWED_ORIGINS }));
+app.use(cors(corsConfig));
 app.use(express.json({ limit: "5mb" }));
 
 const apiLimiter = rateLimit({
