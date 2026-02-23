@@ -372,7 +372,7 @@ app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) 
     const countResult = await pool.query(
       "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
     );
-    const total = parseInt(countResult.rows[0].count);
+    const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -382,7 +382,7 @@ app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) 
 app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT COUNT(*) FROM reports WHERE resolved = FALSE");
-    res.json({ pending: parseInt(rows[0].count) });
+    res.json({ pending: rows[0] ? parseInt(rows[0].count) : 0 });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -465,20 +465,21 @@ io.on("connection", (socket) => {
   });
 
   socket.on("join_room", (roomId) => {
+    if (!connectedUsers.has(socket.id) || !roomId || typeof roomId !== "string") return;
     socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("room_" + roomId);
   });
 
   socket.on("join_dm", (chatId) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !chatId.split("_").includes(user.uid)) return;
+    if (!user || !chatId || typeof chatId !== "string" || !chatId.split("_").includes(user.uid)) return;
     socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("dm_" + chatId);
   });
 
   socket.on("send_message", async ({ roomId, text }) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !text || !text.trim() || text.length > 500) return;
+    if (!user || !roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (containsBadWord(text.trim())) {
       socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
       return;
@@ -499,7 +500,7 @@ io.on("connection", (socket) => {
 
   socket.on("send_dm", async ({ chatId, text }) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !text || !text.trim() || text.length > 500) return;
+    if (!user || !chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (!chatId.split("_").includes(user.uid)) return;
     if (containsBadWord(text.trim())) {
       socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
@@ -521,21 +522,21 @@ io.on("connection", (socket) => {
 
   socket.on("typing", (data) => {
     const user = connectedUsers.get(socket.id);
-    if (!user) return;
+    if (!user || !data) return;
     if (data.chatId) socket.to("dm_" + data.chatId).emit("user_typing", { uid: user.uid, name: user.name });
     else if (data.roomId) socket.to("room_" + data.roomId).emit("user_typing", { uid: user.uid, name: user.name });
   });
 
   socket.on("stop_typing", (data) => {
     const user = connectedUsers.get(socket.id);
-    if (!user) return;
+    if (!user || !data) return;
     if (data.chatId) socket.to("dm_" + data.chatId).emit("user_stop_typing", { uid: user.uid });
     else if (data.roomId) socket.to("room_" + data.roomId).emit("user_stop_typing", { uid: user.uid });
   });
 
   socket.on("theriotype_set", (data) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !data.theriotype) return;
+    if (!user || !data || !data.theriotype) return;
     const roomMap = { wolf: "wolves", cat: "cats", fox: "foxes", bird: "birds", dragon: "dragons", bear: "bears", deer: "deer" };
     const roomId = roomMap[data.theriotype];
     if (roomId) {
