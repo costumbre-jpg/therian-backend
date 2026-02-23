@@ -43,6 +43,7 @@ if (process.env.DATABASE_URL) {
     .catch(err => console.error("ERROR PostgreSQL:", err.message));
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => {});
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desc_text TEXT DEFAULT ''`).catch(() => {});
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS theriotype TEXT DEFAULT ''`).catch(() => {});
   pool.query(`CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
     msg_id TEXT,
@@ -173,7 +174,9 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
     const gUser = await verifyGoogleToken(idToken);
     const uid   = gUser.sub; // ID unico de Google
 
-    // Upsert usuario en PostgreSQL
+    const existing = await pool.query("SELECT id FROM users WHERE id = $1", [uid]);
+    const isNewUser = existing.rows.length === 0;
+
     const { rows } = await pool.query(
       `INSERT INTO users (id, name, photo, email, last_seen)
        VALUES ($1, $2, $3, $4, NOW())
@@ -188,9 +191,17 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
     // Bloquear usuarios baneados
     if (user.is_banned) return res.status(403).json({ error: "Tu cuenta ha sido baneada de Therians." });
 
-    // Emitir nuestro propio JWT (valido 30 dias)
+    if (isNewUser) {
+      io.to("room_general").emit("new_message", {
+        id: "sys-" + Date.now(), room_id: "general", user_id: "system",
+        name: "Therians", photo: "", premium: false, theriotype: "",
+        text: "🐾 " + (user.name || "A new therian") + " just joined the pack! Welcome!",
+        created_at: new Date().toISOString(), is_system: true
+      });
+    }
+
     const token = jwt.sign({ uid: user.id }, JWT_SECRET, { expiresIn: "30d" });
-    res.json({ token, user });
+    res.json({ token, user, is_new: isNewUser });
   } catch (err) {
     console.error("Auth error:", err.message);
     res.status(401).json({ error: err.message });
@@ -209,16 +220,27 @@ app.get("/api/users/me", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- ACTUALIZAR PERFIL (descripcion) ----
+// ---- ACTUALIZAR PERFIL (descripcion + theriotype) ----
 app.patch("/api/users/me", authMiddleware, async (req, res) => {
-  const { desc } = req.body;
+  const { desc, theriotype } = req.body;
   if (desc !== undefined && typeof desc === "string" && desc.length > 200) {
     return res.status(400).json({ error: "Descripcion muy larga (max 200)" });
   }
+  const validTheriotypes = ["", "wolf", "cat", "fox", "bird", "dragon", "bear", "deer", "other"];
+  if (theriotype !== undefined && !validTheriotypes.includes(theriotype)) {
+    return res.status(400).json({ error: "Theriotype invalido" });
+  }
   try {
+    const updates = [];
+    const values = [];
+    let idx = 1;
+    if (desc !== undefined) { updates.push("desc_text = $" + idx); values.push(desc || ""); idx++; }
+    if (theriotype !== undefined) { updates.push("theriotype = $" + idx); values.push(theriotype); idx++; }
+    if (!updates.length) return res.status(400).json({ error: "No hay cambios" });
+    values.push(req.uid);
     const { rows } = await pool.query(
-      "UPDATE users SET desc_text = $1 WHERE id = $2 RETURNING *",
-      [desc || "", req.uid]
+      "UPDATE users SET " + updates.join(", ") + " WHERE id = $" + idx + " RETURNING *",
+      values
     );
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
     const user = rows[0];
@@ -252,7 +274,7 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.room_id, m.user_id, m.text, m.created_at,
-              u.name, u.photo, u.premium
+              u.name, u.photo, u.premium, u.theriotype
        FROM messages m JOIN users u ON u.id = m.user_id
        WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
       [req.params.roomId]
@@ -268,7 +290,7 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at,
-              u.name, u.photo, u.premium
+              u.name, u.photo, u.premium, u.theriotype
        FROM dm_messages m JOIN users u ON u.id = m.user_id
        WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
       [req.params.chatId]
@@ -281,7 +303,7 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
 app.get("/api/friends", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT u.id, u.name, u.photo, u.premium, u.last_seen
+      `SELECT u.id, u.name, u.photo, u.premium, u.last_seen, u.theriotype
        FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = $1`,
       [req.uid]
     );
@@ -293,7 +315,7 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
 app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT id, name, photo, last_seen, desc_text FROM users WHERE id = $1", [req.params.uid]
+      "SELECT id, name, photo, last_seen, desc_text, theriotype FROM users WHERE id = $1", [req.params.uid]
     );
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
     const user = rows[0];
@@ -391,7 +413,7 @@ io.on("connection", (socket) => {
         if (!rows.length) return socket.emit("auth_error", "Usuario no encontrado");
         const user = rows[0];
         if (user.is_banned) return socket.emit("banned");
-        connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium });
+        connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium, theriotype: user.theriotype || "" });
         socket.emit("auth_ok");
         pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => {});
       });
@@ -427,6 +449,7 @@ io.on("connection", (socket) => {
       io.to("room_" + roomId).emit("new_message", {
         id: rows[0].id, room_id: roomId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
+        theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at
       });
     } catch (err) { socket.emit("message_error", err.message); }
@@ -448,9 +471,40 @@ io.on("connection", (socket) => {
       io.to("dm_" + chatId).emit("new_dm", {
         id: rows[0].id, chat_id: chatId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
+        theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at
       });
     } catch (err) { socket.emit("message_error", err.message); }
+  });
+
+  socket.on("typing", (data) => {
+    const user = connectedUsers.get(socket.id);
+    if (!user) return;
+    if (data.chatId) socket.to("dm_" + data.chatId).emit("user_typing", { uid: user.uid, name: user.name });
+    else if (data.roomId) socket.to("room_" + data.roomId).emit("user_typing", { uid: user.uid, name: user.name });
+  });
+
+  socket.on("stop_typing", (data) => {
+    const user = connectedUsers.get(socket.id);
+    if (!user) return;
+    if (data.chatId) socket.to("dm_" + data.chatId).emit("user_stop_typing", { uid: user.uid });
+    else if (data.roomId) socket.to("room_" + data.roomId).emit("user_stop_typing", { uid: user.uid });
+  });
+
+  socket.on("theriotype_set", (data) => {
+    const user = connectedUsers.get(socket.id);
+    if (!user || !data.theriotype) return;
+    const roomMap = { wolf: "wolves", cat: "cats", fox: "foxes", bird: "birds", dragon: "dragons", bear: "bears", deer: "deer" };
+    const roomId = roomMap[data.theriotype];
+    if (roomId) {
+      io.to("room_" + roomId).emit("new_message", {
+        id: "sys-" + Date.now(), room_id: roomId, user_id: "system",
+        name: "Therians", photo: "", premium: false, theriotype: "",
+        text: "🐾 " + user.name + " is a " + data.theriotype + " therian! Welcome to the den!",
+        created_at: new Date().toISOString(), is_system: true
+      });
+    }
+    user.theriotype = data.theriotype;
   });
 
   socket.on("disconnect", () => {
