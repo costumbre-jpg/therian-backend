@@ -1,20 +1,27 @@
-﻿// ============================================
+// ============================================
 // Therian Chat  Backend Server v2
 // Node.js + Express + Socket.io + PostgreSQL
 // Google Identity Services (sin Firebase)
 // ============================================
 
-const express  = require("express");
-const http     = require("http");
-const { Server } = require("socket.io");
-const cors     = require("cors");
-const { Pool } = require("pg");
-const jwt      = require("jsonwebtoken");
+const express     = require("express");
+const http        = require("http");
+const { Server }  = require("socket.io");
+const cors        = require("cors");
+const rateLimit   = require("express-rate-limit");
+const { Pool }    = require("pg");
+const jwt         = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 
-const PORT         = process.env.PORT || 4000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
-const JWT_SECRET      = process.env.JWT_SECRET      || "therian_secret_change_this_in_production";
+const PORT             = process.env.PORT || 4000;
+const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
+const ALLOWED_ORIGINS  = [FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:5500"];
+
+if (!process.env.JWT_SECRET) {
+  console.error("FATAL: JWT_SECRET env var is required. Server cannot start without it.");
+  process.exit(1);
+}
+const JWT_SECRET       = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const ADMIN_UID        = process.env.ADMIN_UID || "";
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -29,6 +36,7 @@ if (process.env.DATABASE_URL) {
   pool.query("SELECT 1").then(() => console.log("OK PostgreSQL"))
     .catch(err => console.error("ERROR PostgreSQL:", err.message));
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => {});
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desc_text TEXT DEFAULT ''`).catch(() => {});
   pool.query(`CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
     msg_id TEXT,
@@ -87,24 +95,28 @@ async function sendReportEmail(report) {
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] }
 });
 
-app.use(cors({ origin: "*" }));
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json({ limit: "5mb" }));
 
-app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
-
-// ---- DIAGNÓSTICO TEMPORAL ----
-app.get("/api/debug-env", (req, res) => {
-  res.json({
-    has_google_client_id: !!process.env.GOOGLE_CLIENT_ID,
-    google_client_id_length: (process.env.GOOGLE_CLIENT_ID || "").length,
-    has_database_url: !!process.env.DATABASE_URL,
-    has_jwt_secret: !!process.env.JWT_SECRET,
-    node_env: process.env.NODE_ENV || "not set"
-  });
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." }
 });
+app.use("/api/", apiLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many login attempts. Try again in 15 minutes." }
+});
+
+app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
 
 // ---- VERIFICAR TOKEN DE GOOGLE con librería oficial ----
 async function verifyGoogleToken(idToken) {
@@ -143,7 +155,7 @@ function adminMiddleware(req, res, next) {
 // ============================================================
 
 // ---- LOGIN CON GOOGLE (intercambia id_token de Google por nuestro JWT) ----
-app.post("/api/auth/google", async (req, res) => {
+app.post("/api/auth/google", authLimiter, async (req, res) => {
   const { idToken } = req.body;
   if (!idToken) return res.status(400).json({ error: "idToken requerido" });
   try {
@@ -181,6 +193,25 @@ app.get("/api/users/me", authMiddleware, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
     const user = rows[0];
     user.is_admin = !!(ADMIN_UID && req.uid === ADMIN_UID);
+    user.desc = user.desc_text || "";
+    res.json(user);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- ACTUALIZAR PERFIL (descripcion) ----
+app.patch("/api/users/me", authMiddleware, async (req, res) => {
+  const { desc } = req.body;
+  if (desc !== undefined && typeof desc === "string" && desc.length > 200) {
+    return res.status(400).json({ error: "Descripcion muy larga (max 200)" });
+  }
+  try {
+    const { rows } = await pool.query(
+      "UPDATE users SET desc_text = $1 WHERE id = $2 RETURNING *",
+      [desc || "", req.uid]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
+    const user = rows[0];
+    user.desc = user.desc_text;
     res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -251,10 +282,12 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
 app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT id, name, photo FROM users WHERE id = $1", [req.params.uid]
+      "SELECT id, name, photo, last_seen, desc_text FROM users WHERE id = $1", [req.params.uid]
     );
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
-    res.json(rows[0]);
+    const user = rows[0];
+    user.desc = user.desc_text || "";
+    res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
