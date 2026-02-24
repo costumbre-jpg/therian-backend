@@ -8,7 +8,7 @@ webpush.setVapidDetails(
 );
 // En producción, guarda las claves en variables de entorno y no las generes cada vez
 
-
+// ...existing code...
 // Endpoint para registrar suscripción push (guarda en DB)
 app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
   const sub = req.body;
