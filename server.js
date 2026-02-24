@@ -196,6 +196,7 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
         id: "sys-" + Date.now(), room_id: "general", user_id: "system",
         name: "Therians", photo: "", premium: false, theriotype: "",
         text: "🐾 " + (user.name || "A new therian") + " just joined the pack! Welcome!",
+        sys_type: "welcome", sys_name: user.name || "A new therian",
         created_at: new Date().toISOString(), is_system: true
       });
     }
@@ -511,12 +512,25 @@ io.on("connection", (socket) => {
         `INSERT INTO dm_messages (chat_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *`,
         [chatId, user.uid, text.trim()]
       );
-      io.to("dm_" + chatId).emit("new_dm", {
+      const dmMsg = {
         id: rows[0].id, chat_id: chatId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
         theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at
-      });
+      };
+      io.to("dm_" + chatId).emit("new_dm", dmMsg);
+
+      // Notify recipient if they're not in this DM room
+      const parts = chatId.split("_");
+      const recipientUid = parts[0] === user.uid ? parts[1] : parts[0];
+      for (const [sid, u] of connectedUsers.entries()) {
+        if (u.uid === recipientUid) {
+          const recipientSocket = io.sockets.sockets.get(sid);
+          if (recipientSocket && !recipientSocket.rooms.has("dm_" + chatId)) {
+            recipientSocket.emit("dm_notify", { from: user.name, chatId, text: rows[0].text });
+          }
+        }
+      }
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -544,6 +558,7 @@ io.on("connection", (socket) => {
         id: "sys-" + Date.now(), room_id: roomId, user_id: "system",
         name: "Therians", photo: "", premium: false, theriotype: "",
         text: "🐾 " + user.name + " is a " + data.theriotype + " therian! Welcome to the den!",
+        sys_type: "theriotype", sys_name: user.name, sys_theriotype: data.theriotype,
         created_at: new Date().toISOString(), is_system: true
       });
     }
