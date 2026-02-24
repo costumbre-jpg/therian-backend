@@ -48,7 +48,7 @@ const jwt         = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 
 const PORT             = process.env.PORT || 4000;
-const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
+const FRONTEND_URL     = "https://therianworld.netlify.app";
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -137,8 +137,11 @@ const app    = express();
 const server = http.createServer(app);
 const corsConfig = {
   origin: function(origin, callback) {
-    if (isAllowedOrigin(origin)) callback(null, true);
-    else callback(new Error("CORS not allowed"));
+    if (!origin || origin === FRONTEND_URL || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS not allowed"));
+    }
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
 };
@@ -163,6 +166,30 @@ const authLimiter = rateLimit({
 });
 
 app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
+
+// Endpoint para registrar suscripción push (guarda en DB)
+app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: 'Suscripción inválida' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
+      [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para obtener la clave pública VAPID
+app.get('/api/push/public-key', (req, res) => {
+  res.json({ publicKey: VAPID_KEYS.publicKey });
+});
 
 // ---- VERIFICAR TOKEN DE GOOGLE con librería oficial ----
 async function verifyGoogleToken(idToken) {
@@ -359,59 +386,64 @@ app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- AGREGAR AMIGO ----
-app.post("/api/friends/:friendId", authMiddleware, async (req, res) => {
-  const { friendId } = req.params;
-  if (friendId === req.uid) return res.status(400).json({ error: "No puedes agregarte a ti mismo" });
-  try {
-    await pool.query(
-      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2), ($2, $1) ON CONFLICT DO NOTHING`,
-      [req.uid, friendId]
-    );
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// ---- WEB PUSH ----
+const webpush = require('web-push');
+const VAPID_KEYS = webpush.generateVAPIDKeys();
+webpush.setVapidDetails(
+  'mailto:admin@therianworld.netlify.app',
+  VAPID_KEYS.publicKey,
+  VAPID_KEYS.privateKey
+);
+// En producción, guarda las claves en variables de entorno y no las generes cada vez
 
-// ---- REPORTAR MENSAJE ----
-app.post("/api/reports", authMiddleware, async (req, res) => {
-  const { msgId, msgText, reportedUid, reportedName, roomId } = req.body;
-  if (!reportedUid || !msgText) return res.status(400).json({ error: "Datos incompletos" });
-  try {
-    await pool.query(
-      `INSERT INTO reports (msg_id, msg_text, reported_uid, reported_name, reporter_uid, room_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [msgId || null, msgText, reportedUid, reportedName || "", req.uid, roomId || ""]
-    );
-    await sendReportEmail({ msg_text: msgText, reported_uid: reportedUid, reported_name: reportedName, room_id: roomId, reporter_uid: req.uid });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// ...existing code...
+    // Endpoint para registrar suscripción push (guarda en DB)
+    app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
+      const sub = req.body;
+      if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+        return res.status(400).json({ error: 'Suscripción inválida' });
+      }
+      try {
+        await pool.query(
+          `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
+          [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+        );
+        res.json({ ok: true });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
 
-// ---- VER REPORTES (solo admin, con paginacion y filtro) ----
-app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
-  try {
-    const status = req.query.status || "pending";
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = 20;
-    const offset = (page - 1) * limit;
-    const resolved = status === "resolved";
+    // Endpoint para obtener la clave pública VAPID
+    app.get('/api/push/public-key', (req, res) => {
+      res.json({ publicKey: VAPID_KEYS.publicKey });
+    });
+    app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
+      try {
+        const page = parseInt(req.query.page, 10) || 1;
+        const status = req.query.status || "pending";
+        const limit = 20;
+        const offset = (page - 1) * limit;
+        const resolved = status === "resolved";
 
-    const { rows } = await pool.query(
-      `SELECT r.*, u.photo AS reported_photo
-       FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
-       WHERE r.resolved = $1
-       ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
-      [resolved, limit, offset]
-    );
+        const { rows } = await pool.query(
+          `SELECT r.*, u.photo AS reported_photo
+           FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
+           WHERE r.resolved = $1
+           ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+          [resolved, limit, offset]
+        );
 
-    const countResult = await pool.query(
-      "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
-    );
-    const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+        const countResult = await pool.query(
+          "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
+        );
+        const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
-    res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+        res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
+      } catch (err) { res.status(500).json({ error: err.message }); }
+    });
 
 // ---- CONTAR REPORTES PENDIENTES (solo admin) ----
 app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req, res) => {
