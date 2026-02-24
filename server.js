@@ -62,7 +62,7 @@ if (process.env.DATABASE_URL) {
 // ---- WORD FILTER ----
 const BAD_WORDS = [
   // Hate speech / death threats
-  "kill yourself","kys","go die","you should die","i hope you die","mátate","suicídate","espero que te mueras",
+  "kill yourself","kys","go die","you should die","i hope you die"," mátate","suicídate","espero que te mueras",
   // Slurs (EN)
   "faggot","nigger","nigga","retard","retarded",
   // Slurs (ES)
@@ -337,6 +337,26 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- AGREGAR AMIGO ----
+app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
+  const friendUid = req.params.uid;
+  if (!friendUid || friendUid === req.uid) return res.status(400).json({ error: "ID inválido" });
+  try {
+    // Verifica que el usuario a agregar exista
+    const { rows } = await pool.query("SELECT id FROM users WHERE id = $1", [friendUid]);
+    if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
+    // Inserta la amistad si no existe
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2)
+       ON CONFLICT (user_id, friend_id) DO NOTHING`,
+      [req.uid, friendUid]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---- BUSCAR USUARIO POR ID ----
