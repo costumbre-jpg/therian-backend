@@ -442,6 +442,23 @@ app.delete("/api/admin/messages/:msgId", authMiddleware, adminMiddleware, async 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Borrar tu propio mensaje (sala o DM)
+app.delete("/api/messages/:msgId", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query("DELETE FROM messages WHERE id = $1 AND user_id = $2 RETURNING room_id", [req.params.msgId, req.uid]);
+    if (rows.length) {
+      io.to("room_" + rows[0].room_id).emit("message_deleted", req.params.msgId);
+      return res.json({ ok: true });
+    }
+    const dm = await pool.query("DELETE FROM dm_messages WHERE id = $1 AND user_id = $2 RETURNING chat_id", [req.params.msgId, req.uid]);
+    if (dm.rows.length) {
+      io.to("dm_" + dm.rows[0].chat_id).emit("message_deleted", req.params.msgId);
+      return res.json({ ok: true });
+    }
+    res.status(404).json({ error: "Message not found" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ============================================================
 // SOCKET.IO
 // ============================================================
