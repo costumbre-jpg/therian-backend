@@ -1,30 +1,3 @@
-// ---- WEB PUSH ----
-// En producción, guarda las claves en variables de entorno y no las generes cada vez
-
-
-// Endpoint para registrar suscripción push (guarda en DB)
-app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
-  const sub = req.body;
-  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
-    return res.status(400).json({ error: 'Suscripción inválida' });
-  }
-  try {
-    await pool.query(
-      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
-      [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Endpoint para obtener la clave pública VAPID
-app.get('/api/push/public-key', (req, res) => {
-  res.json({ publicKey: VAPID_KEYS.publicKey });
-});
 // ============================================
 // Therian Chat  Backend Server v2
 // Node.js + Express + Socket.io + PostgreSQL
