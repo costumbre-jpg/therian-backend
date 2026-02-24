@@ -345,7 +345,7 @@ app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
   if (!friendUid || friendUid === req.uid) return res.status(400).json({ error: "ID inválido" });
   try {
     // Verifica que el usuario a agregar exista
-    const { rows } = await pool.query("SELECT id FROM users WHERE id = $1", [friendUid]);
+    const { rows } = await pool.query("SELECT id, name FROM users WHERE id = $1", [friendUid]);
     if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
     // Inserta la amistad si no existe
     await pool.query(
@@ -353,6 +353,15 @@ app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
        ON CONFLICT (user_id, friend_id) DO NOTHING`,
       [req.uid, friendUid]
     );
+    // Emitir evento de notificación al usuario agregado
+    for (const [socketId, u] of connectedUsers.entries()) {
+      if (u.uid === friendUid) {
+        io.to(socketId).emit("friend_added", {
+          from: req.uid,
+          name: req.uid, // Si quieres mostrar el nombre, haz otra consulta para obtenerlo
+        });
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
