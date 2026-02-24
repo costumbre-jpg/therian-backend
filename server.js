@@ -1,3 +1,37 @@
+// ---- WEB PUSH ----
+const webpush = require('web-push');
+const VAPID_KEYS = webpush.generateVAPIDKeys();
+webpush.setVapidDetails(
+  'mailto:admin@therianworld.netlify.app',
+  VAPID_KEYS.publicKey,
+  VAPID_KEYS.privateKey
+);
+// En producción, guarda las claves en variables de entorno y no las generes cada vez
+
+
+// Endpoint para registrar suscripción push (guarda en DB)
+app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: 'Suscripción inválida' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
+      [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint para obtener la clave pública VAPID
+app.get('/api/push/public-key', (req, res) => {
+  res.json({ publicKey: VAPID_KEYS.publicKey });
+});
 // ============================================
 // Therian Chat  Backend Server v2
 // Node.js + Express + Socket.io + PostgreSQL
@@ -513,6 +547,8 @@ io.on("connection", (socket) => {
         theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at
       });
+      // Enviar push a usuarios de la sala (excepto remitente)
+      sendPushToRoom(roomId, user.uid, `${user.name}: ${rows[0].text}`);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -536,18 +572,10 @@ io.on("connection", (socket) => {
         text: rows[0].text, created_at: rows[0].created_at
       };
       io.to("dm_" + chatId).emit("new_dm", dmMsg);
-
-      // Notify recipient if they're not in this DM room
+      // Notificación push real al destinatario
       const parts = chatId.split("_");
       const recipientUid = parts[0] === user.uid ? parts[1] : parts[0];
-      for (const [sid, u] of connectedUsers.entries()) {
-        if (u.uid === recipientUid) {
-          const recipientSocket = io.sockets.sockets.get(sid);
-          if (recipientSocket && !recipientSocket.rooms.has("dm_" + chatId)) {
-            recipientSocket.emit("dm_notify", { from: user.name, chatId, text: rows[0].text });
-          }
-        }
-      }
+      sendPushToUser(recipientUid, user.name, rows[0].text);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 

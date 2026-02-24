@@ -1,3 +1,11 @@
+-- Notificaciones Push Web
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
 -- ============================================
 -- Therian Chat — Schema PostgreSQL
 -- Ejecutar esto en Railway Query Console
