@@ -48,7 +48,7 @@ const jwt         = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 
 const PORT             = process.env.PORT || 4000;
-const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
+const FRONTEND_URL     = "https://therianworld.netlify.app";
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -137,8 +137,11 @@ const app    = express();
 const server = http.createServer(app);
 const corsConfig = {
   origin: function(origin, callback) {
-    if (isAllowedOrigin(origin)) callback(null, true);
-    else callback(new Error("CORS not allowed"));
+    if (!origin || origin === FRONTEND_URL || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("CORS not allowed"));
+    }
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
 };
