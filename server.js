@@ -1,8 +1,3 @@
-// ...existing code...
-
-// ...existing code...
-// ...existing code...
-// ...existing code...
 // ============================================
 // Therian Chat  Backend Server v2
 // Node.js + Express + Socket.io + PostgreSQL
@@ -17,16 +12,10 @@ const rateLimit   = require("express-rate-limit");
 const { Pool }    = require("pg");
 const jwt         = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
+const webpush     = require("web-push");
 
 const PORT             = process.env.PORT || 4000;
-const FRONTEND_URL     = "https://therianworld.netlify.app";
-
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (origin === FRONTEND_URL) return true;
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
-  return false;
-}
+const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
 
 if (!process.env.JWT_SECRET) {
   console.error("FATAL: JWT_SECRET env var is required. Server cannot start without it.");
@@ -35,7 +24,11 @@ if (!process.env.JWT_SECRET) {
 const JWT_SECRET       = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const ADMIN_UID        = process.env.ADMIN_UID || "";
+const WEB3FORMS_KEY    = process.env.WEB3FORMS_KEY || "";
 const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// ---- VALID ROOMS (whitelist for room validation) ----
+const VALID_ROOMS = ["general", "wolves", "cats", "foxes", "birds", "dragons", "bears", "deer", "vent"];
 
 // ---- POSTGRESQL ----
 const pool = new Pool({
@@ -60,8 +53,15 @@ if (process.env.DATABASE_URL) {
     created_at TIMESTAMP DEFAULT NOW(),
     resolved BOOLEAN DEFAULT FALSE
   )`).catch(() => {});
+  pool.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`).catch(() => {});
 } else {
-  console.warn("WARN: DATABASE_URL no configurada");
+  console.warn("WARN: DATABASE_URL not configured");
 }
 
 // ---- WORD FILTER ----
@@ -83,24 +83,97 @@ function containsBadWord(text) {
   return BAD_WORDS.some(w => lower.includes(w));
 }
 
+// ---- WEB3FORMS REPORT EMAIL ----
 async function sendReportEmail(report) {
+  if (!WEB3FORMS_KEY) return;
   try {
     await fetch("https://api.web3forms.com/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        access_key: "9076b9a0-51a2-44af-8ee3-7ba4f9a2b7dd",
-        subject: "\uD83D\uDEA8 Therians — Mensaje reportado",
-        from_name: "Therians Moderacion",
+        access_key: WEB3FORMS_KEY,
+        subject: "\uD83D\uDEA8 Therians — Reported message",
+        from_name: "Therians Moderation",
         message:
-          "Usuario reportado: " + (report.reported_name || report.reported_uid) + "\n" +
-          "ID usuario: " + report.reported_uid + "\n" +
-          "Sala: " + (report.room_id || "DM") + "\n" +
-          "Mensaje: " + report.msg_text + "\n" +
-          "Reportado por: " + report.reporter_uid
+          "Reported user: " + (report.reported_name || report.reported_uid) + "\n" +
+          "User ID: " + report.reported_uid + "\n" +
+          "Room: " + (report.room_id || "DM") + "\n" +
+          "Message: " + report.msg_text + "\n" +
+          "Reported by: " + report.reporter_uid
       })
     });
   } catch(e) { console.error("Email report error:", e.message); }
+}
+
+// ---- VAPID KEYS (from env vars, not regenerated) ----
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    "mailto:admin@therianworld.netlify.app",
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+  console.log("OK VAPID keys configured");
+} else {
+  console.warn("WARN: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY not configured. Push notifications disabled.");
+}
+
+// ---- PUSH NOTIFICATION HELPERS ----
+async function sendPushToUser(recipientUid, title, body) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const { rows } = await pool.query(
+      "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1",
+      [recipientUid]
+    );
+    if (!rows.length) return;
+    const sub = {
+      endpoint: rows[0].endpoint,
+      keys: { p256dh: rows[0].p256dh, auth: rows[0].auth }
+    };
+    await webpush.sendNotification(sub, JSON.stringify({
+      title: title,
+      body: body,
+      url: "/chat.html"
+    }));
+  } catch (err) {
+    // If subscription expired, remove it
+    if (err.statusCode === 410 || err.statusCode === 404) {
+      await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [recipientUid]).catch(() => {});
+    }
+  }
+}
+
+async function sendPushToRoom(roomId, senderUid, body) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    // Get all push subscriptions except sender's
+    const { rows } = await pool.query(
+      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1",
+      [senderUid]
+    );
+    for (const row of rows) {
+      try {
+        const sub = {
+          endpoint: row.endpoint,
+          keys: { p256dh: row.p256dh, auth: row.auth }
+        };
+        await webpush.sendNotification(sub, JSON.stringify({
+          title: "New message in #" + roomId,
+          body: body,
+          url: "/chat.html"
+        }));
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error("sendPushToRoom error:", err.message);
+  }
 }
 
 // ---- EXPRESS ----
@@ -138,73 +211,48 @@ const authLimiter = rateLimit({
 
 app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
 
-// Endpoint para registrar suscripción push (guarda en DB)
-app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
-  const sub = req.body;
-  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
-    return res.status(400).json({ error: 'Suscripción inválida' });
-  }
-  try {
-    await pool.query(
-      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
-      [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Endpoint para obtener la clave pública VAPID
-app.get('/api/push/public-key', (req, res) => {
-  res.json({ publicKey: VAPID_KEYS.publicKey });
-});
-
-// ---- VERIFICAR TOKEN DE GOOGLE con librería oficial ----
+// ---- VERIFY GOOGLE TOKEN ----
 async function verifyGoogleToken(idToken) {
   const ticket = await googleClient.verifyIdToken({
     idToken,
-    audience: GOOGLE_CLIENT_ID || undefined  // si no hay CLIENT_ID configurado, igual verifica
+    audience: GOOGLE_CLIENT_ID || undefined
   });
   const payload = ticket.getPayload();
-  // payload tiene: sub, email, name, picture
   return payload;
 }
 
-// ---- MIDDLEWARE: verificar nuestro JWT ----
+// ---- MIDDLEWARE: verify JWT ----
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "No autorizado" });
+    return res.status(401).json({ error: "Not authorized" });
   }
   try {
     const decoded = jwt.verify(header.split(" ")[1], JWT_SECRET);
     req.uid = decoded.uid;
     next();
   } catch (err) {
-    res.status(401).json({ error: "Token invalido o expirado" });
+    res.status(401).json({ error: "Invalid or expired token" });
   }
 }
 
-// ---- MIDDLEWARE: solo admin ----
+// ---- MIDDLEWARE: admin only ----
 function adminMiddleware(req, res, next) {
-  if (!ADMIN_UID || req.uid !== ADMIN_UID) return res.status(403).json({ error: "No autorizado" });
+  if (!ADMIN_UID || req.uid !== ADMIN_UID) return res.status(403).json({ error: "Not authorized" });
   next();
 }
 
 // ============================================================
-// RUTAS
+// ROUTES
 // ============================================================
 
-// ---- LOGIN CON GOOGLE (intercambia id_token de Google por nuestro JWT) ----
+// ---- LOGIN WITH GOOGLE ----
 app.post("/api/auth/google", authLimiter, async (req, res) => {
   const { idToken } = req.body;
-  if (!idToken) return res.status(400).json({ error: "idToken requerido" });
+  if (!idToken) return res.status(400).json({ error: "idToken required" });
   try {
     const gUser = await verifyGoogleToken(idToken);
-    const uid   = gUser.sub; // ID unico de Google
+    const uid   = gUser.sub;
 
     const existing = await pool.query("SELECT id FROM users WHERE id = $1", [uid]);
     const isNewUser = existing.rows.length === 0;
@@ -220,8 +268,7 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
     );
     const user = rows[0];
 
-    // Bloquear usuarios baneados
-    if (user.is_banned) return res.status(403).json({ error: "Tu cuenta ha sido baneada de Therians." });
+    if (user.is_banned) return res.status(403).json({ error: "Your account has been banned from Therians." });
 
     if (isNewUser) {
       io.to("room_general").emit("new_message", {
@@ -241,11 +288,11 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
   }
 });
 
-// ---- PERFIL ----
+// ---- PROFILE ----
 app.get("/api/users/me", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [req.uid]);
-    if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
     const user = rows[0];
     user.is_admin = !!(ADMIN_UID && req.uid === ADMIN_UID);
     user.desc = user.desc_text || "";
@@ -253,15 +300,15 @@ app.get("/api/users/me", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- ACTUALIZAR PERFIL (descripcion + theriotype) ----
+// ---- UPDATE PROFILE (description + theriotype) ----
 app.patch("/api/users/me", authMiddleware, async (req, res) => {
   const { desc, theriotype } = req.body;
   if (desc !== undefined && typeof desc === "string" && desc.length > 200) {
-    return res.status(400).json({ error: "Descripcion muy larga (max 200)" });
+    return res.status(400).json({ error: "Description too long (max 200)" });
   }
   const validTheriotypes = ["", "wolf", "cat", "fox", "bird", "dragon", "bear", "deer", "other"];
   if (theriotype !== undefined && !validTheriotypes.includes(theriotype)) {
-    return res.status(400).json({ error: "Theriotype invalido" });
+    return res.status(400).json({ error: "Invalid theriotype" });
   }
   try {
     const updates = [];
@@ -269,57 +316,59 @@ app.patch("/api/users/me", authMiddleware, async (req, res) => {
     let idx = 1;
     if (desc !== undefined) { updates.push("desc_text = $" + idx); values.push(desc || ""); idx++; }
     if (theriotype !== undefined) { updates.push("theriotype = $" + idx); values.push(theriotype); idx++; }
-    if (!updates.length) return res.status(400).json({ error: "No hay cambios" });
+    if (!updates.length) return res.status(400).json({ error: "No changes" });
     values.push(req.uid);
     const { rows } = await pool.query(
       "UPDATE users SET " + updates.join(", ") + " WHERE id = $" + idx + " RETURNING *",
       values
     );
-    if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
     const user = rows[0];
     user.desc = user.desc_text;
     res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- ACTUALIZAR NOMBRE ----
+// ---- UPDATE NAME ----
 app.put("/api/users/me/name", authMiddleware, async (req, res) => {
   const { name } = req.body;
-  if (!name || name.length > 40) return res.status(400).json({ error: "Nombre invalido" });
+  if (!name || name.length > 40) return res.status(400).json({ error: "Invalid name" });
   try {
     await pool.query("UPDATE users SET name = $1 WHERE id = $2", [name, req.uid]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- ACTUALIZAR FOTO (base64) ----
+// ---- UPDATE PHOTO (base64) ----
 app.put("/api/users/me/photo", authMiddleware, async (req, res) => {
   const { photo } = req.body;
-  if (!photo) return res.status(400).json({ error: "Foto requerida" });
+  if (!photo) return res.status(400).json({ error: "Photo required" });
   try {
     await pool.query("UPDATE users SET photo = $1 WHERE id = $2", [photo, req.uid]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- MENSAJES DE SALA ----
+// ---- ROOM MESSAGES ----
 app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
+  const roomId = req.params.roomId;
+  if (!VALID_ROOMS.includes(roomId)) return res.status(400).json({ error: "Invalid room" });
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.room_id, m.user_id, m.text, m.created_at,
               u.name, u.photo, u.premium, u.theriotype
        FROM messages m JOIN users u ON u.id = m.user_id
        WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
-      [req.params.roomId]
+      [roomId]
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- MENSAJES DM ----
+// ---- DM MESSAGES ----
 app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   const uids = req.params.chatId.split("_");
-  if (!uids.includes(req.uid)) return res.status(403).json({ error: "Acceso denegado" });
+  if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at,
@@ -332,7 +381,7 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- AMIGOS ----
+// ---- FRIENDS ----
 app.get("/api/friends", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -344,79 +393,113 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- BUSCAR USUARIO POR ID ----
+// ---- ADD FRIEND ----
+app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
+  const friendUid = req.params.uid;
+  if (!friendUid || friendUid === req.uid) return res.status(400).json({ error: "Invalid ID" });
+  try {
+    const { rows } = await pool.query("SELECT id, name FROM users WHERE id = $1", [friendUid]);
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2)
+       ON CONFLICT (user_id, friend_id) DO NOTHING`,
+      [req.uid, friendUid]
+    );
+    // Notify the added user via socket
+    for (const [socketId, u] of connectedUsers.entries()) {
+      if (u.uid === friendUid) {
+        io.to(socketId).emit("friend_added", { from: req.uid });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- LOOKUP USER BY ID (requires auth) ----
 app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
       "SELECT id, name, photo, last_seen, desc_text, theriotype FROM users WHERE id = $1", [req.params.uid]
     );
-    if (!rows.length) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
     const user = rows[0];
     user.desc = user.desc_text || "";
     res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- WEB PUSH ----
-const webpush = require('web-push');
-const VAPID_KEYS = webpush.generateVAPIDKeys();
-webpush.setVapidDetails(
-  'mailto:admin@therianworld.netlify.app',
-  VAPID_KEYS.publicKey,
-  VAPID_KEYS.privateKey
-);
-// En producción, guarda las claves en variables de entorno y no las generes cada vez
+// ---- PUSH NOTIFICATION ENDPOINTS ----
+app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: "Invalid subscription" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
+      [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-// ...existing code...
-    // Endpoint para registrar suscripción push (guarda en DB)
-    app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
-      const sub = req.body;
-      if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
-        return res.status(400).json({ error: 'Suscripción inválida' });
-      }
-      try {
-        await pool.query(
-          `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
-          [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
-        );
-        res.json({ ok: true });
-      } catch (err) {
-        res.status(500).json({ error: err.message });
-      }
+app.get("/api/push/public-key", (req, res) => {
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+// ---- CREATE REPORT ----
+app.post("/api/reports", authMiddleware, async (req, res) => {
+  const { msgId, msgText, reportedUid, reportedName, roomId } = req.body;
+  if (!msgText && !reportedUid) return res.status(400).json({ error: "Invalid report data" });
+  try {
+    await pool.query(
+      `INSERT INTO reports (msg_id, msg_text, reported_uid, reported_name, reporter_uid, room_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [msgId || null, msgText || "", reportedUid || "", reportedName || "", req.uid, roomId || ""]
+    );
+    // Send email notification to admin
+    sendReportEmail({
+      reported_name: reportedName,
+      reported_uid: reportedUid,
+      room_id: roomId,
+      msg_text: msgText,
+      reporter_uid: req.uid
     });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-    // Endpoint para obtener la clave pública VAPID
-    app.get('/api/push/public-key', (req, res) => {
-      res.json({ publicKey: VAPID_KEYS.publicKey });
-    });
-    app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
-      try {
-        const page = parseInt(req.query.page, 10) || 1;
-        const status = req.query.status || "pending";
-        const limit = 20;
-        const offset = (page - 1) * limit;
-        const resolved = status === "resolved";
+// ---- ADMIN: GET REPORTS (paginated) ----
+app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const status = req.query.status || "pending";
+    const limit = 20;
+    const offset = (page - 1) * limit;
+    const resolved = status === "resolved";
 
-        const { rows } = await pool.query(
-          `SELECT r.*, u.photo AS reported_photo
-           FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
-           WHERE r.resolved = $1
-           ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
-          [resolved, limit, offset]
-        );
+    const { rows } = await pool.query(
+      `SELECT r.*, u.photo AS reported_photo
+       FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
+       WHERE r.resolved = $1
+       ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+      [resolved, limit, offset]
+    );
 
-        const countResult = await pool.query(
-          "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
-        );
-        const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+    const countResult = await pool.query(
+      "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
+    );
+    const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
-        res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
-      } catch (err) { res.status(500).json({ error: err.message }); }
-    });
+    res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-// ---- CONTAR REPORTES PENDIENTES (solo admin) ----
+// ---- ADMIN: COUNT PENDING REPORTS ----
 app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT COUNT(*) FROM reports WHERE resolved = FALSE");
@@ -424,7 +507,7 @@ app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req,
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- RESOLVER/DESCARTAR REPORTE (solo admin) ----
+// ---- ADMIN: RESOLVE/DISMISS REPORT ----
 app.patch("/api/admin/reports/:id", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     await pool.query("UPDATE reports SET resolved = TRUE WHERE id = $1", [req.params.id]);
@@ -433,14 +516,12 @@ app.patch("/api/admin/reports/:id", authMiddleware, adminMiddleware, async (req,
 });
 
 // ============================================================
-// ADMIN: BAN / UNBAN / BORRAR MENSAJE
+// ADMIN: BAN / UNBAN / DELETE MESSAGE
 // ============================================================
 
-// Banear usuario
 app.post("/api/admin/ban/:uid", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     await pool.query("UPDATE users SET is_banned = TRUE WHERE id = $1", [req.params.uid]);
-    // Desconectar su socket si está conectado
     connectedUsers.forEach((u, socketId) => {
       if (u.uid === req.params.uid) {
         io.to(socketId).emit("banned");
@@ -452,7 +533,6 @@ app.post("/api/admin/ban/:uid", authMiddleware, adminMiddleware, async (req, res
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Lista de usuarios baneados
 app.get("/api/admin/banned", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -462,7 +542,6 @@ app.get("/api/admin/banned", authMiddleware, adminMiddleware, async (req, res) =
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Desbanear usuario
 app.post("/api/admin/unban/:uid", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     await pool.query("UPDATE users SET is_banned = FALSE WHERE id = $1", [req.params.uid]);
@@ -470,7 +549,6 @@ app.post("/api/admin/unban/:uid", authMiddleware, adminMiddleware, async (req, r
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Borrar mensaje de sala
 app.delete("/api/admin/messages/:msgId", authMiddleware, adminMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("DELETE FROM messages WHERE id = $1 RETURNING room_id", [req.params.msgId]);
@@ -479,7 +557,6 @@ app.delete("/api/admin/messages/:msgId", authMiddleware, adminMiddleware, async 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Borrar tu propio mensaje (sala o DM)
 app.delete("/api/messages/:msgId", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query("DELETE FROM messages WHERE id = $1 AND user_id = $2 RETURNING room_id", [req.params.msgId, req.uid]);
@@ -507,7 +584,7 @@ io.on("connection", (socket) => {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
       pool.query("SELECT * FROM users WHERE id = $1", [decoded.uid]).then(({ rows }) => {
-        if (!rows.length) return socket.emit("auth_error", "Usuario no encontrado");
+        if (!rows.length) return socket.emit("auth_error", "User not found");
         const user = rows[0];
         if (user.is_banned) return socket.emit("banned");
         connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium, theriotype: user.theriotype || "" });
@@ -515,12 +592,13 @@ io.on("connection", (socket) => {
         pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => {});
       });
     } catch (err) {
-      socket.emit("auth_error", "Token invalido");
+      socket.emit("auth_error", "Invalid token");
     }
   });
 
   socket.on("join_room", (roomId) => {
     if (!connectedUsers.has(socket.id) || !roomId || typeof roomId !== "string") return;
+    if (!VALID_ROOMS.includes(roomId)) return;
     socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("room_" + roomId);
   });
@@ -535,8 +613,9 @@ io.on("connection", (socket) => {
   socket.on("send_message", async ({ roomId, text }) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
+    if (!VALID_ROOMS.includes(roomId)) return;
     if (containsBadWord(text.trim())) {
-      socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
+      socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
       return;
     }
     try {
@@ -550,7 +629,6 @@ io.on("connection", (socket) => {
         theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at
       });
-      // Enviar push a usuarios de la sala (excepto remitente)
       sendPushToRoom(roomId, user.uid, `${user.name}: ${rows[0].text}`);
     } catch (err) { socket.emit("message_error", err.message); }
   });
@@ -560,7 +638,7 @@ io.on("connection", (socket) => {
     if (!user || !chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (!chatId.split("_").includes(user.uid)) return;
     if (containsBadWord(text.trim())) {
-      socket.emit("message_blocked", "Tu mensaje fue bloqueado por contener contenido no permitido.");
+      socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
       return;
     }
     try {
@@ -575,10 +653,20 @@ io.on("connection", (socket) => {
         text: rows[0].text, created_at: rows[0].created_at
       };
       io.to("dm_" + chatId).emit("new_dm", dmMsg);
-      // Notificación push real al destinatario
+      // Push notification + socket notify to recipient
       const parts = chatId.split("_");
       const recipientUid = parts[0] === user.uid ? parts[1] : parts[0];
       sendPushToUser(recipientUid, user.name, rows[0].text);
+      // Emit dm_notify to recipient's socket(s) for in-app toast
+      for (const [socketId, u] of connectedUsers.entries()) {
+        if (u.uid === recipientUid) {
+          io.to(socketId).emit("dm_notify", {
+            from: user.name,
+            text: rows[0].text,
+            chatId
+          });
+        }
+      }
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -622,4 +710,4 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => console.log("Therian backend puerto " + PORT));
+server.listen(PORT, () => console.log("Therian backend running on port " + PORT));

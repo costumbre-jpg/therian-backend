@@ -1,22 +1,17 @@
--- Notificaciones Push Web
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  endpoint TEXT NOT NULL,
-  p256dh TEXT NOT NULL,
-  auth TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
 -- ============================================
 -- Therian Chat — Schema PostgreSQL
--- Ejecutar esto en Railway Query Console
+-- Execute this in Railway Query Console
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS users (
-  id          TEXT PRIMARY KEY,        -- Firebase UID
+  id          TEXT PRIMARY KEY,        -- Google sub ID
   name        TEXT NOT NULL,
-  photo       TEXT,                    -- base64 o URL
+  photo       TEXT,                    -- base64 or URL
   email       TEXT,
   premium     BOOLEAN DEFAULT false,
+  is_banned   BOOLEAN DEFAULT false,
+  desc_text   TEXT DEFAULT '',
+  theriotype  TEXT DEFAULT '',
   last_seen   TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -31,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id, create
 
 CREATE TABLE IF NOT EXISTS dm_messages (
   id          SERIAL PRIMARY KEY,
-  chat_id     TEXT NOT NULL,           -- uid1_uid2 ordenados
+  chat_id     TEXT NOT NULL,           -- uid1_uid2 sorted
   user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   text        TEXT NOT NULL CHECK (char_length(text) <= 500),
   created_at  TIMESTAMPTZ DEFAULT NOW()
@@ -43,4 +38,24 @@ CREATE TABLE IF NOT EXISTS friends (
   friend_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   PRIMARY KEY (user_id, friend_id)
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+  id            SERIAL PRIMARY KEY,
+  msg_id        TEXT,
+  msg_text      TEXT,
+  reported_uid  TEXT,
+  reported_name TEXT,
+  reporter_uid  TEXT,
+  room_id       TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  resolved      BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  user_id     TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  endpoint    TEXT NOT NULL,
+  p256dh      TEXT NOT NULL,
+  auth        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
 );
