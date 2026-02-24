@@ -1,11 +1,4 @@
 // ---- WEB PUSH ----
-const webpush = require('web-push');
-const VAPID_KEYS = webpush.generateVAPIDKeys();
-webpush.setVapidDetails(
-  'mailto:admin@therianworld.netlify.app',
-  VAPID_KEYS.publicKey,
-  VAPID_KEYS.privateKey
-);
 // En producción, guarda las claves en variables de entorno y no las generes cada vez
 
 
@@ -387,13 +380,6 @@ app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
 });
 
 // ---- WEB PUSH ----
-const webpush = require('web-push');
-const VAPID_KEYS = webpush.generateVAPIDKeys();
-webpush.setVapidDetails(
-  'mailto:admin@therianworld.netlify.app',
-  VAPID_KEYS.publicKey,
-  VAPID_KEYS.privateKey
-);
 // En producción, guarda las claves en variables de entorno y no las generes cada vez
 
 // ...existing code...
