@@ -362,39 +362,40 @@ app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- AGREGAR AMIGO ----
-app.post("/api/friends/:friendId", authMiddleware, async (req, res) => {
-  const { friendId } = req.params;
-  if (friendId === req.uid) return res.status(400).json({ error: "No puedes agregarte a ti mismo" });
-  try {
-    await pool.query(
-      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2), ($2, $1) ON CONFLICT DO NOTHING`,
-      [req.uid, friendId]
-    );
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// ---- WEB PUSH ----
+const webpush = require('web-push');
+const VAPID_KEYS = webpush.generateVAPIDKeys();
+webpush.setVapidDetails(
+  'mailto:admin@therianworld.netlify.app',
+  VAPID_KEYS.publicKey,
+  VAPID_KEYS.privateKey
+);
+// En producción, guarda las claves en variables de entorno y no las generes cada vez
 
-// ---- REPORTAR MENSAJE ----
-app.post("/api/reports", authMiddleware, async (req, res) => {
-  const { msgId, msgText, reportedUid, reportedName, roomId } = req.body;
-  if (!reportedUid || !msgText) return res.status(400).json({ error: "Datos incompletos" });
-  try {
-    await pool.query(
-      `INSERT INTO reports (msg_id, msg_text, reported_uid, reported_name, reporter_uid, room_id)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [msgId || null, msgText, reportedUid, reportedName || "", req.uid, roomId || ""]
-    );
-    await sendReportEmail({ msg_text: msgText, reported_uid: reportedUid, reported_name: reportedName, room_id: roomId, reporter_uid: req.uid });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// ...existing code...
+    // Endpoint para registrar suscripción push (guarda en DB)
+    app.post('/api/push/subscribe', authMiddleware, async (req, res) => {
+      const sub = req.body;
+      if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+        return res.status(400).json({ error: 'Suscripción inválida' });
+      }
+      try {
+        await pool.query(
+          `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
+          [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+        );
+        res.json({ ok: true });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
 
-// ---- VER REPORTES (solo admin, con paginacion y filtro) ----
-app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
-  try {
-    const status = req.query.status || "pending";
-    const page = Math.max(1, parseInt(req.query.page) || 1);
+    // Endpoint para obtener la clave pública VAPID
+    app.get('/api/push/public-key', (req, res) => {
+      res.json({ publicKey: VAPID_KEYS.publicKey });
+    });
     const limit = 20;
     const offset = (page - 1) * limit;
     const resolved = status === "resolved";
