@@ -340,7 +340,7 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
 });
 
 // ---- BUSCAR USUARIO POR ID ----
-app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
+app.get("/api/users/lookup/:uid", async (req, res) => {
   try {
     const { rows } = await pool.query(
       "SELECT id, name, photo, last_seen, desc_text, theriotype FROM users WHERE id = $1", [req.params.uid]
