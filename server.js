@@ -388,26 +388,30 @@ webpush.setVapidDetails(
     app.get('/api/push/public-key', (req, res) => {
       res.json({ publicKey: VAPID_KEYS.publicKey });
     });
-    const limit = 20;
-    const offset = (page - 1) * limit;
-    const resolved = status === "resolved";
+    app.get("/api/admin/reports", authMiddleware, adminMiddleware, async (req, res) => {
+      try {
+        const page = parseInt(req.query.page, 10) || 1;
+        const status = req.query.status || "pending";
+        const limit = 20;
+        const offset = (page - 1) * limit;
+        const resolved = status === "resolved";
 
-    const { rows } = await pool.query(
-      `SELECT r.*, u.photo AS reported_photo
-       FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
-       WHERE r.resolved = $1
-       ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
-      [resolved, limit, offset]
-    );
+        const { rows } = await pool.query(
+          `SELECT r.*, u.photo AS reported_photo
+           FROM reports r LEFT JOIN users u ON u.id = r.reported_uid
+           WHERE r.resolved = $1
+           ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`,
+          [resolved, limit, offset]
+        );
 
-    const countResult = await pool.query(
-      "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
-    );
-    const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+        const countResult = await pool.query(
+          "SELECT COUNT(*) FROM reports WHERE resolved = $1", [resolved]
+        );
+        const total = countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
-    res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+        res.json({ reports: rows, total, page, pages: Math.ceil(total / limit) });
+      } catch (err) { res.status(500).json({ error: err.message }); }
+    });
 
 // ---- CONTAR REPORTES PENDIENTES (solo admin) ----
 app.get("/api/admin/reports/count", authMiddleware, adminMiddleware, async (req, res) => {
