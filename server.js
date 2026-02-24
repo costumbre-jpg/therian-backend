@@ -353,7 +353,18 @@ app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
 });
 
 // ---- WEB PUSH ----
-// En producción, guarda las claves en variables de entorno y no las generes cada vez
+const webpush = require('web-push');
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+  console.error('FATAL: VAPID_PUBLIC_KEY y VAPID_PRIVATE_KEY son requeridas.');
+  process.exit(1);
+}
+webpush.setVapidDetails(
+  'mailto:admin@therianworld.netlify.app',
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY
+);
 
 // ...existing code...
     // Endpoint para registrar suscripción push (guarda en DB)
