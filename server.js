@@ -406,7 +406,8 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
 
 // ---- DM MESSAGES ----
 app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
-  const uids = req.params.chatId.split("_");
+  const chatId = req.params.chatId;
+  const uids = chatId.split("_");
   if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const { rows } = await pool.query(
@@ -414,8 +415,29 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
               u.name, u.photo, u.premium, u.theriotype
        FROM dm_messages m JOIN users u ON u.id = m.user_id
        WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
-      [req.params.chatId]
+      [chatId]
     );
+
+    // Mark messages as read automatically when history is fetched by recipient
+    const result = await pool.query(
+      `UPDATE dm_messages SET read_at = NOW()
+       WHERE chat_id = $1 AND user_id != $2 AND read_at IS NULL`,
+      [chatId, req.uid]
+    );
+    if (result.rowCount > 0) {
+      const otherUid = uids[0] === req.uid ? uids[1] : uids[0];
+      for (const [socketId, u] of connectedUsers.entries()) {
+        if (u.uid === otherUid) {
+          io.to(socketId).emit("dm_read", { chatId, readBy: req.uid });
+        }
+      }
+
+      // Update read_at in the returned rows for consistency
+      rows.forEach(r => {
+        if (r.user_id !== req.uid && !r.read_at) r.read_at = new Date();
+      });
+    }
+
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
