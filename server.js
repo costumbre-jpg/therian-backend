@@ -4,28 +4,28 @@
 // Google Identity Services (sin Firebase)
 // ============================================
 
-const express     = require("express");
-const http        = require("http");
-const { Server }  = require("socket.io");
-const cors        = require("cors");
-const rateLimit   = require("express-rate-limit");
-const { Pool }    = require("pg");
-const jwt         = require("jsonwebtoken");
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const { Pool } = require("pg");
+const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
-const webpush     = require("web-push");
+const webpush = require("web-push");
 
-const PORT             = process.env.PORT || 4000;
-const FRONTEND_URL     = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
+const PORT = process.env.PORT || 4000;
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://therianworld.netlify.app";
 
 if (!process.env.JWT_SECRET) {
   console.error("FATAL: JWT_SECRET env var is required. Server cannot start without it.");
   process.exit(1);
 }
-const JWT_SECRET       = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const ADMIN_UID        = process.env.ADMIN_UID || "";
-const WEB3FORMS_KEY    = process.env.WEB3FORMS_KEY || "";
-const googleClient     = new OAuth2Client(GOOGLE_CLIENT_ID);
+const ADMIN_UID = process.env.ADMIN_UID || "";
+const WEB3FORMS_KEY = process.env.WEB3FORMS_KEY || "";
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ---- VALID ROOMS (whitelist for room validation) ----
 const VALID_ROOMS = ["general", "wolves", "cats", "foxes", "birds", "dragons", "bears", "deer", "vent"];
@@ -39,9 +39,9 @@ const pool = new Pool({
 if (process.env.DATABASE_URL) {
   pool.query("SELECT 1").then(() => console.log("OK PostgreSQL"))
     .catch(err => console.error("ERROR PostgreSQL:", err.message));
-  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => {});
-  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desc_text TEXT DEFAULT ''`).catch(() => {});
-  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS theriotype TEXT DEFAULT ''`).catch(() => {});
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desc_text TEXT DEFAULT ''`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS theriotype TEXT DEFAULT ''`).catch(() => { });
   pool.query(`CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
     msg_id TEXT,
@@ -52,14 +52,23 @@ if (process.env.DATABASE_URL) {
     room_id TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     resolved BOOLEAN DEFAULT FALSE
-  )`).catch(() => {});
+  )`).catch(() => { });
   pool.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     endpoint TEXT NOT NULL,
     p256dh TEXT NOT NULL,
     auth TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
-  )`).catch(() => {});
+  )`).catch(() => { });
+  pool.query(`CREATE TABLE IF NOT EXISTS friend_requests (
+    id SERIAL PRIMARY KEY,
+    from_uid TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    to_uid TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(from_uid, to_uid)
+  )`).catch(() => { });
+  pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ DEFAULT NULL`).catch(() => { });
 } else {
   console.warn("WARN: DATABASE_URL not configured");
 }
@@ -67,15 +76,15 @@ if (process.env.DATABASE_URL) {
 // ---- WORD FILTER ----
 const BAD_WORDS = [
   // Hate speech / death threats
-  "kill yourself","kys","go die","you should die","i hope you die","mátate","suicídate","espero que te mueras",
+  "kill yourself", "kys", "go die", "you should die", "i hope you die", "mátate", "suicídate", "espero que te mueras",
   // Slurs (EN)
-  "faggot","nigger","nigga","retard","retarded",
+  "faggot", "nigger", "nigga", "retard", "retarded",
   // Slurs (ES)
-  "maricón","maricon","negro de mierda","puto imbécil",
+  "maricón", "maricon", "negro de mierda", "puto imbécil",
   // Harassment
-  "rape","pedophile","pedo","violación","violacion",
+  "rape", "pedophile", "pedo", "violación", "violacion",
   // Extreme insults
-  "go fuck yourself","fuck you","hijo de puta","hdp","me cago en tu madre"
+  "go fuck yourself", "fuck you", "hijo de puta", "hdp", "me cago en tu madre"
 ];
 
 function containsBadWord(text) {
@@ -102,11 +111,11 @@ async function sendReportEmail(report) {
           "Reported by: " + report.reporter_uid
       })
     });
-  } catch(e) { console.error("Email report error:", e.message); }
+  } catch (e) { console.error("Email report error:", e.message); }
 }
 
 // ---- VAPID KEYS (from env vars, not regenerated) ----
-const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -141,7 +150,7 @@ async function sendPushToUser(recipientUid, title, body) {
   } catch (err) {
     // If subscription expired, remove it
     if (err.statusCode === 410 || err.statusCode === 404) {
-      await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [recipientUid]).catch(() => {});
+      await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [recipientUid]).catch(() => { });
     }
   }
 }
@@ -167,7 +176,7 @@ async function sendPushToRoom(roomId, senderUid, body) {
         }));
       } catch (err) {
         if (err.statusCode === 410 || err.statusCode === 404) {
-          await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => {});
+          await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => { });
         }
       }
     }
@@ -177,10 +186,10 @@ async function sendPushToRoom(roomId, senderUid, body) {
 }
 
 // ---- EXPRESS ----
-const app    = express();
+const app = express();
 const server = http.createServer(app);
 const corsConfig = {
-  origin: function(origin, callback) {
+  origin: function (origin, callback) {
     if (!origin || origin === FRONTEND_URL || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       callback(null, true);
     } else {
@@ -189,7 +198,7 @@ const corsConfig = {
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
 };
-const io     = new Server(server, { cors: corsConfig });
+const io = new Server(server, { cors: corsConfig });
 
 app.use(cors(corsConfig));
 app.use(express.json({ limit: "5mb" }));
@@ -252,7 +261,7 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
   if (!idToken) return res.status(400).json({ error: "idToken required" });
   try {
     const gUser = await verifyGoogleToken(idToken);
-    const uid   = gUser.sub;
+    const uid = gUser.sub;
 
     const existing = await pool.query("SELECT id FROM users WHERE id = $1", [uid]);
     const isNewUser = existing.rows.length === 0;
@@ -371,7 +380,7 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const { rows } = await pool.query(
-      `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at,
+      `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at, m.read_at,
               u.name, u.photo, u.premium, u.theriotype
        FROM dm_messages m JOIN users u ON u.id = m.user_id
        WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
@@ -393,24 +402,120 @@ app.get("/api/friends", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- ADD FRIEND ----
+// ---- SEND FRIEND REQUEST ----
 app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
   const friendUid = req.params.uid;
   if (!friendUid || friendUid === req.uid) return res.status(400).json({ error: "Invalid ID" });
   try {
-    const { rows } = await pool.query("SELECT id, name FROM users WHERE id = $1", [friendUid]);
-    if (!rows.length) return res.status(404).json({ error: "User not found" });
-    await pool.query(
-      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2)
-       ON CONFLICT (user_id, friend_id) DO NOTHING`,
-      [req.uid, friendUid]
+    const { rows: userRows } = await pool.query("SELECT id, name FROM users WHERE id = $1", [friendUid]);
+    if (!userRows.length) return res.status(404).json({ error: "User not found" });
+    // Check if already friends
+    const { rows: existing } = await pool.query(
+      "SELECT 1 FROM friends WHERE user_id = $1 AND friend_id = $2", [req.uid, friendUid]
     );
-    // Notify the added user via socket
+    if (existing.length) return res.json({ ok: true, already: true });
+    // Check if request already exists
+    const { rows: existingReq } = await pool.query(
+      "SELECT id, status FROM friend_requests WHERE from_uid = $1 AND to_uid = $2", [req.uid, friendUid]
+    );
+    if (existingReq.length) {
+      if (existingReq[0].status === 'pending') return res.json({ ok: true, pending: true });
+      // If rejected, allow re-sending
+      await pool.query("UPDATE friend_requests SET status = 'pending', created_at = NOW() WHERE id = $1", [existingReq[0].id]);
+    } else {
+      // Check if THEY already sent US a request — auto-accept
+      const { rows: reverseReq } = await pool.query(
+        "SELECT id FROM friend_requests WHERE from_uid = $1 AND to_uid = $2 AND status = 'pending'", [friendUid, req.uid]
+      );
+      if (reverseReq.length) {
+        // Auto-accept: they requested us, we requested them
+        await pool.query("UPDATE friend_requests SET status = 'accepted' WHERE id = $1", [reverseReq[0].id]);
+        await pool.query(
+          `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.uid, friendUid]
+        );
+        await pool.query(
+          `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [friendUid, req.uid]
+        );
+        // Notify both via socket
+        const { rows: meRows } = await pool.query("SELECT name, photo FROM users WHERE id = $1", [req.uid]);
+        for (const [socketId, u] of connectedUsers.entries()) {
+          if (u.uid === friendUid) {
+            io.to(socketId).emit("friend_accepted", { uid: req.uid, name: meRows[0]?.name || "Therian" });
+          }
+          if (u.uid === req.uid) {
+            io.to(socketId).emit("friend_accepted", { uid: friendUid, name: userRows[0].name });
+          }
+        }
+        return res.json({ ok: true, accepted: true });
+      }
+      await pool.query(
+        `INSERT INTO friend_requests (from_uid, to_uid) VALUES ($1, $2)`, [req.uid, friendUid]
+      );
+    }
+    // Get sender info for notification
+    const { rows: senderRows } = await pool.query("SELECT name, photo FROM users WHERE id = $1", [req.uid]);
+    const senderName = senderRows[0]?.name || "Someone";
+    const senderPhoto = senderRows[0]?.photo || "";
+    // Notify recipient via socket
     for (const [socketId, u] of connectedUsers.entries()) {
       if (u.uid === friendUid) {
-        io.to(socketId).emit("friend_added", { from: req.uid });
+        io.to(socketId).emit("friend_request", { from: req.uid, name: senderName, photo: senderPhoto });
       }
     }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- GET PENDING FRIEND REQUESTS ----
+app.get("/api/friend-requests", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fr.id, fr.from_uid, fr.created_at, u.name, u.photo, u.theriotype
+       FROM friend_requests fr JOIN users u ON u.id = fr.from_uid
+       WHERE fr.to_uid = $1 AND fr.status = 'pending'
+       ORDER BY fr.created_at DESC`,
+      [req.uid]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- ACCEPT FRIEND REQUEST ----
+app.post("/api/friend-requests/:id/accept", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM friend_requests WHERE id = $1 AND to_uid = $2 AND status = 'pending'",
+      [req.params.id, req.uid]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Request not found" });
+    const fr = rows[0];
+    await pool.query("UPDATE friend_requests SET status = 'accepted' WHERE id = $1", [fr.id]);
+    // Create friendship both ways
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.uid, fr.from_uid]
+    );
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [fr.from_uid, req.uid]
+    );
+    // Notify the sender via socket
+    const { rows: meRows } = await pool.query("SELECT name, photo FROM users WHERE id = $1", [req.uid]);
+    for (const [socketId, u] of connectedUsers.entries()) {
+      if (u.uid === fr.from_uid) {
+        io.to(socketId).emit("friend_accepted", { uid: req.uid, name: meRows[0]?.name || "Therian" });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- REJECT FRIEND REQUEST ----
+app.post("/api/friend-requests/:id/reject", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "UPDATE friend_requests SET status = 'rejected' WHERE id = $1 AND to_uid = $2 AND status = 'pending'",
+      [req.params.id, req.uid]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "Request not found" });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -449,6 +554,30 @@ app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
 
 app.get("/api/push/public-key", (req, res) => {
   res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+// ---- MARK DM MESSAGES AS READ ----
+app.post("/api/dms/:chatId/read", authMiddleware, async (req, res) => {
+  const chatId = req.params.chatId;
+  const uids = chatId.split("_");
+  if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
+  try {
+    const result = await pool.query(
+      `UPDATE dm_messages SET read_at = NOW()
+       WHERE chat_id = $1 AND user_id != $2 AND read_at IS NULL`,
+      [chatId, req.uid]
+    );
+    // Notify the other user that their messages were read
+    if (result.rowCount > 0) {
+      const otherUid = uids[0] === req.uid ? uids[1] : uids[0];
+      for (const [socketId, u] of connectedUsers.entries()) {
+        if (u.uid === otherUid) {
+          io.to(socketId).emit("dm_read", { chatId, readBy: req.uid });
+        }
+      }
+    }
+    res.json({ ok: true, count: result.rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---- CREATE REPORT ----
@@ -589,7 +718,7 @@ io.on("connection", (socket) => {
         if (user.is_banned) return socket.emit("banned");
         connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium, theriotype: user.theriotype || "" });
         socket.emit("auth_ok");
-        pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => {});
+        pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => { });
       });
     } catch (err) {
       socket.emit("auth_error", "Invalid token");
@@ -704,7 +833,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     const user = connectedUsers.get(socket.id);
     if (user) {
-      pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.uid]).catch(() => {});
+      pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.uid]).catch(() => { });
       connectedUsers.delete(socket.id);
     }
   });
