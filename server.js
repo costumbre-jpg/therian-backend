@@ -115,16 +115,23 @@ async function sendReportEmail(report) {
 }
 
 // ---- VAPID KEYS (from env vars, not regenerated) ----
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_PUBLIC_KEY = (process.env.VAPID_PUBLIC_KEY || "").trim();
+const VAPID_PRIVATE_KEY = (process.env.VAPID_PRIVATE_KEY || "").trim();
+let vapidConfigured = false;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(
-    "mailto:admin@therianworld.netlify.app",
-    VAPID_PUBLIC_KEY,
-    VAPID_PRIVATE_KEY
-  );
-  console.log("OK VAPID keys configured");
+  try {
+    webpush.setVapidDetails(
+      "mailto:admin@therianworld.netlify.app",
+      VAPID_PUBLIC_KEY,
+      VAPID_PRIVATE_KEY
+    );
+    vapidConfigured = true;
+    console.log("OK VAPID keys configured");
+  } catch (err) {
+    console.error("ERROR VAPID keys invalid (push disabled):", err.message);
+    console.error("Make sure you copied the keys without extra spaces or quotes.");
+  }
 } else {
   console.warn("WARN: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY not configured. Push notifications disabled.");
 }
