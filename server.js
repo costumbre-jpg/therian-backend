@@ -397,7 +397,7 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
       `SELECT m.id, m.room_id, m.user_id, m.text, m.created_at,
               u.name, u.photo, u.premium, u.theriotype
        FROM messages m JOIN users u ON u.id = m.user_id
-       WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
+       WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
       [roomId]
     );
     res.json(rows);
@@ -414,7 +414,7 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
       `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at, m.read_at,
               u.name, u.photo, u.premium, u.theriotype
        FROM dm_messages m JOIN users u ON u.id = m.user_id
-       WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 80`,
+       WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
       [chatId]
     );
 
@@ -771,9 +771,28 @@ io.on("connection", (socket) => {
         connectedUsers.set(socket.id, { uid: user.id, name: user.name, photo: user.photo, premium: user.premium, theriotype: user.theriotype || "" });
         socket.emit("auth_ok");
         pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.id]).catch(() => { });
+
+        // Send initial online users to this socket
+        const onlineUids = Array.from(new Set(Array.from(connectedUsers.values()).map(u => u.uid)));
+        socket.emit("online_users", onlineUids);
+
+        // Tell others this user is online
+        socket.broadcast.emit("user_online", user.id);
       });
     } catch (err) {
       socket.emit("auth_error", "Invalid token");
+    }
+  });
+
+  socket.on("disconnect", () => {
+    const user = connectedUsers.get(socket.id);
+    if (user) {
+      connectedUsers.delete(socket.id);
+      pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.uid]).catch(() => { });
+      const stillOnline = Array.from(connectedUsers.values()).some(u => u.uid === user.uid);
+      if (!stillOnline) {
+        io.emit("user_offline", user.uid);
+      }
     }
   });
 
