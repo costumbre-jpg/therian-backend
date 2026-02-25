@@ -365,6 +365,29 @@ app.put("/api/users/me/photo", authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ---- PUSH SUBSCRIPTION ----
+app.get("/api/vapid-public-key", (req, res) => {
+  res.send(VAPID_PUBLIC_KEY || "");
+});
+
+app.post("/api/users/push-subscribe", authMiddleware, async (req, res) => {
+  const sub = req.body;
+  if (!sub || !sub.endpoint) return res.status(400).json({ error: "Invalid subscription" });
+  try {
+    const keys = sub.keys || {};
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id) DO UPDATE
+       SET endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+      [req.uid, sub.endpoint, keys.p256dh, keys.auth]
+    );
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---- ROOM MESSAGES ----
 app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
   const roomId = req.params.roomId;
