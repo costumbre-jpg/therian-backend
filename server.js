@@ -27,8 +27,13 @@ const ADMIN_UID = process.env.ADMIN_UID || "";
 const WEB3FORMS_KEY = process.env.WEB3FORMS_KEY || "";
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// ---- VALID ROOMS (whitelist for room validation) ----
-const VALID_ROOMS = ["general", "wolves", "cats", "foxes", "birds", "dragons", "bears", "deer", "vent"];
+// ---- VALID ROOMS (whitelist para todo QIURE) ----
+const VALID_ROOMS = [
+  // Salas de Therian World
+  "general", "wolves", "cats", "foxes", "birds", "dragons", "bears", "deer", "vent",
+  // Salas de Music World
+  "music_general", "music_pop", "music_rap", "music_reggaeton", "music_kpop", "music_rock"
+];
 
 // ---- POSTGRESQL ----
 const pool = new Pool({
