@@ -29,10 +29,16 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ---- VALID ROOMS (whitelist para todo QIURE) ----
 const VALID_ROOMS = [
-  // Salas de Therian World
+  // Therian World
   "general", "wolves", "cats", "foxes", "birds", "dragons", "bears", "deer", "vent",
-  // Salas de Music World
-  "music_general", "music_pop", "music_rap", "music_reggaeton", "music_kpop", "music_rock"
+  // Music World
+  "music_pop", "music_rock", "music_latina", "music_jazz", "music_electronica", "music_clasica", "music_hiphop", "music_internacional",
+  // Social World
+  "social_facebook", "social_instagram", "social_tiktok", "social_twitter", "social_youtube", "social_linkedin", "social_emerging",
+  // Prog World
+  "prog_languages", "prog_web", "prog_mobile", "prog_databases", "prog_ai", "prog_devops", "prog_security",
+  // Anime World
+  "anime_shonen", "anime_shojo", "anime_seinen", "anime_isekai", "anime_mecha", "anime_sliceoflife", "anime_otaku"
 ];
 
 // ---- POSTGRESQL ----
@@ -200,9 +206,13 @@ async function sendPushToRoom(roomId, senderUid, body) {
 // ---- EXPRESS ----
 const app = express();
 const server = http.createServer(app);
+
+// Support multiple frontend origins (comma-separated in FRONTEND_URL env)
+const ALLOWED_ORIGINS = FRONTEND_URL.split(",").map(u => u.trim()).filter(Boolean);
+
 const corsConfig = {
   origin: function (origin, callback) {
-    if (!origin || origin === FRONTEND_URL || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       callback(null, true);
     } else {
       callback(new Error("CORS not allowed"));
