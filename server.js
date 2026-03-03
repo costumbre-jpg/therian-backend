@@ -871,7 +871,8 @@ io.on("connection", (socket) => {
 
   socket.on("send_message", async ({ roomId, text, replyTo }) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
+    if (!user) { socket.emit("message_error", "Not authenticated yet. Please wait a moment."); return; }
+    if (!roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (!VALID_ROOMS.includes(roomId)) return;
     if (containsBadWord(text.trim())) {
       socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
@@ -901,7 +902,8 @@ io.on("connection", (socket) => {
 
   socket.on("send_dm", async ({ chatId, text, replyTo }) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
+    if (!user) { socket.emit("message_error", "Not authenticated yet. Please wait a moment."); return; }
+    if (!chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
     const dmUids = chatId.split("_");
     if (dmUids.length !== 2 || !dmUids.includes(user.uid)) return;
     if (containsBadWord(text.trim())) {
