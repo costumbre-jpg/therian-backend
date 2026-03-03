@@ -617,6 +617,23 @@ app.get("/api/push/public-key", (req, res) => {
   res.json({ publicKey: VAPID_PUBLIC_KEY, configured: vapidConfigured });
 });
 
+// ---- UNREAD DMS (for checking on login) ----
+app.get("/api/dms/unread", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT chat_id, user_id AS from_uid
+       FROM dm_messages
+       WHERE chat_id LIKE $1 AND user_id != $2 AND read_at IS NULL
+       UNION
+       SELECT DISTINCT chat_id, user_id AS from_uid
+       FROM dm_messages
+       WHERE chat_id LIKE $3 AND user_id != $2 AND read_at IS NULL`,
+      [req.uid + '_%', req.uid, '%_' + req.uid]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ---- MARK DM MESSAGES AS READ ----
 app.post("/api/dms/:chatId/read", authMiddleware, async (req, res) => {
   const chatId = req.params.chatId;
