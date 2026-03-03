@@ -178,21 +178,17 @@ async function sendPushToUser(recipientUid, title, body) {
 async function sendPushToRoom(roomId, senderUid, body) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
-    // Get user IDs of sockets currently in this room (except sender)
-    const roomName = "room_" + roomId;
-    const socketsInRoom = await io.in(roomName).fetchSockets();
-    const uidsInRoom = new Set();
-    for (const s of socketsInRoom) {
-      const u = connectedUsers.get(s.id);
-      if (u && u.uid !== senderUid) uidsInRoom.add(u.uid);
+    // Collect UIDs of ALL currently-connected users (they get real-time via socket)
+    const onlineUids = new Set();
+    for (const [, u] of connectedUsers) {
+      onlineUids.add(u.uid);
     }
-    if (!uidsInRoom.size) return;
 
-    // Get push subscriptions only for users in the room
-    const placeholders = Array.from(uidsInRoom).map((_, i) => "$" + (i + 1)).join(",");
+    // Send push to every subscriber who is NOT currently online (offline users)
+    // and also to online users who are in the room but have the tab hidden
     const { rows } = await pool.query(
-      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN (" + placeholders + ")",
-      Array.from(uidsInRoom)
+      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1",
+      [senderUid]
     );
     for (const row of rows) {
       try {
