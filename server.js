@@ -264,6 +264,27 @@ const authLimiter = rateLimit({
 
 app.get("/", (req, res) => res.json({ status: "ok", app: "Therian Chat API v2" }));
 
+// ---- DIAGNOSTIC ENDPOINT (no auth required) ----
+app.get("/api/health", async (req, res) => {
+  try {
+    const dbCheck = await pool.query("SELECT NOW() as time");
+    const msgCount = await pool.query("SELECT room_id, COUNT(*) as count FROM messages GROUP BY room_id ORDER BY count DESC LIMIT 20");
+    const dmCount = await pool.query("SELECT COUNT(*) as count FROM dm_messages");
+    const userCount = await pool.query("SELECT COUNT(*) as count FROM users");
+    res.json({
+      status: "ok",
+      db_time: dbCheck.rows[0].time,
+      users: userCount.rows[0].count,
+      dm_messages: dmCount.rows[0].count,
+      room_messages: msgCount.rows,
+      connected_sockets: connectedUsers.size,
+      allowed_origins: ALLOWED_ORIGINS
+    });
+  } catch (err) {
+    res.status(500).json({ status: "error", error: err.message });
+  }
+});
+
 // ---- VERIFY GOOGLE TOKEN ----
 async function verifyGoogleToken(idToken) {
   const ticket = await googleClient.verifyIdToken({
@@ -437,8 +458,12 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
        WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
       [roomId]
     );
+    console.log(`[messages] room=${roomId} uid=${req.uid} rows=${rows.length}`);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error(`[messages] ERROR room=${roomId} uid=${req.uid}:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---- DM MESSAGES ----
