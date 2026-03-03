@@ -614,7 +614,7 @@ app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
 });
 
 app.get("/api/push/public-key", (req, res) => {
-  res.json({ publicKey: VAPID_PUBLIC_KEY });
+  res.json({ publicKey: VAPID_PUBLIC_KEY, configured: vapidConfigured });
 });
 
 // ---- MARK DM MESSAGES AS READ ----
