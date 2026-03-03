@@ -236,7 +236,13 @@ const corsConfig = {
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
 };
-const io = new Server(server, { cors: corsConfig });
+const io = new Server(server, {
+  cors: corsConfig,
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  transports: ["polling", "websocket"],
+  allowUpgrades: true
+});
 
 app.use(cors(corsConfig));
 app.use(express.json({ limit: "5mb" }));
@@ -856,8 +862,10 @@ io.on("connection", (socket) => {
   socket.on("join_room", (roomId) => {
     if (!connectedUsers.has(socket.id) || !roomId || typeof roomId !== "string") return;
     if (!VALID_ROOMS.includes(roomId)) return;
-    socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
+    const rooms = Array.from(socket.rooms);
+    rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("room_" + roomId);
+    console.log("Socket", socket.id, "joined room_" + roomId);
   });
 
   socket.on("join_dm", (chatId) => {
@@ -865,8 +873,10 @@ io.on("connection", (socket) => {
     if (!user || !chatId || typeof chatId !== "string") return;
     const dmParts = chatId.split("_");
     if (dmParts.length !== 2 || !dmParts.includes(user.uid)) return;
-    socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
+    const rooms = Array.from(socket.rooms);
+    rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("dm_" + chatId);
+    console.log("Socket", socket.id, "joined dm_" + chatId);
   });
 
   socket.on("send_message", async ({ roomId, text, replyTo }) => {
