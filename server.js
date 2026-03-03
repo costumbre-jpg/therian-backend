@@ -151,13 +151,14 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 
 // ---- PUSH NOTIFICATION HELPERS ----
 async function sendPushToUser(recipientUid, title, body) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { console.log('Push: VAPID keys not configured, skipping'); return; }
   try {
     const { rows } = await pool.query(
       "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1",
       [recipientUid]
     );
-    if (!rows.length) return;
+    if (!rows.length) { console.log('Push: no subscription found for user', recipientUid); return; }
+    console.log('Push: sending to user', recipientUid, 'endpoint:', rows[0].endpoint.substring(0, 60) + '...');
     const sub = {
       endpoint: rows[0].endpoint,
       keys: { p256dh: rows[0].p256dh, auth: rows[0].auth }
@@ -167,9 +168,11 @@ async function sendPushToUser(recipientUid, title, body) {
       body: body,
       url: "/chat.html"
     }));
+    console.log('Push: sent OK to user', recipientUid);
   } catch (err) {
-    // If subscription expired, remove it
+    console.error('Push: sendPushToUser error:', err.statusCode, err.message);
     if (err.statusCode === 410 || err.statusCode === 404) {
+      console.log('Push: removing expired subscription for user', recipientUid);
       await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [recipientUid]).catch(() => { });
     }
   }
@@ -190,6 +193,7 @@ async function sendPushToRoom(roomId, senderUid, body) {
       "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1",
       [senderUid]
     );
+    console.log('Push room: found', rows.length, 'subscription(s) for room', roomId, '(excluding sender', senderUid + ')');
     for (const row of rows) {
       try {
         const sub = {
@@ -201,8 +205,11 @@ async function sendPushToRoom(roomId, senderUid, body) {
           body: body,
           url: "/chat.html"
         }));
+        console.log('Push room: sent OK to user', row.user_id);
       } catch (err) {
+        console.error('Push room: error for user', row.user_id, err.statusCode, err.message);
         if (err.statusCode === 410 || err.statusCode === 404) {
+          console.log('Push room: removing expired subscription for user', row.user_id);
           await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => { });
         }
       }
@@ -597,7 +604,9 @@ app.get("/api/users/lookup/:uid", authMiddleware, async (req, res) => {
 // ---- PUSH NOTIFICATION ENDPOINTS ----
 app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
   const sub = req.body;
+  console.log('Push subscribe: user', req.uid, 'endpoint:', sub && sub.endpoint ? sub.endpoint.substring(0, 60) + '...' : 'MISSING');
   if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    console.log('Push subscribe: INVALID subscription body from user', req.uid);
     return res.status(400).json({ error: "Invalid subscription" });
   }
   try {
@@ -607,8 +616,10 @@ app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
        ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4, created_at = NOW()`,
       [req.uid, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
     );
+    console.log('Push subscribe: SAVED OK for user', req.uid);
     res.json({ ok: true });
   } catch (err) {
+    console.error('Push subscribe: DB error for user', req.uid, err.message);
     res.status(500).json({ error: err.message });
   }
 });
