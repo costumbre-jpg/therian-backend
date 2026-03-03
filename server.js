@@ -325,6 +325,24 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
         sys_type: "welcome", sys_name: user.name || "A new therian",
         created_at: new Date().toISOString(), is_system: true
       });
+      // Push notification to all subscribers: new user joined QIURE
+      (async () => {
+        try {
+          const { rows: allSubs } = await pool.query("SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1", [uid]);
+          for (const row of allSubs) {
+            try {
+              await webpush.sendNotification(
+                { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+                JSON.stringify({ title: "Nuevo en QIURE", body: (user.name || "Alguien") + " se unió a QIURE. ¡Dale la bienvenida!", url: "/" })
+              );
+            } catch (e) {
+              if (e.statusCode === 410 || e.statusCode === 404) {
+                await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => {});
+              }
+            }
+          }
+        } catch (e) { console.error("Push new user error:", e.message); }
+      })();
     }
 
     const token = jwt.sign({ uid: user.id }, JWT_SECRET, { expiresIn: "30d" });
@@ -530,6 +548,8 @@ app.post("/api/friends/:uid", authMiddleware, async (req, res) => {
         io.to(socketId).emit("friend_request", { from: req.uid, name: senderName, photo: senderPhoto });
       }
     }
+    // Push notification for friend request
+    sendPushToUser(friendUid, "Nueva solicitud de amistad", senderName + " te envió una solicitud de amistad");
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -875,7 +895,7 @@ io.on("connection", (socket) => {
         text: rows[0].text, created_at: rows[0].created_at,
         reply_to: replyId, reply: replyData
       });
-      sendPushToRoom(roomId, user.uid, `${user.name}: ${rows[0].text}`);
+      // No push for room messages — push is only for DMs, friend requests and new users
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
