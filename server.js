@@ -176,10 +176,21 @@ async function sendPushToUser(recipientUid, title, body) {
 async function sendPushToRoom(roomId, senderUid, body) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
-    // Get all push subscriptions except sender's
+    // Get user IDs of sockets currently in this room (except sender)
+    const roomName = "room_" + roomId;
+    const socketsInRoom = await io.in(roomName).fetchSockets();
+    const uidsInRoom = new Set();
+    for (const s of socketsInRoom) {
+      const u = connectedUsers.get(s.id);
+      if (u && u.uid !== senderUid) uidsInRoom.add(u.uid);
+    }
+    if (!uidsInRoom.size) return;
+
+    // Get push subscriptions only for users in the room
+    const placeholders = Array.from(uidsInRoom).map((_, i) => "$" + (i + 1)).join(",");
     const { rows } = await pool.query(
-      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1",
-      [senderUid]
+      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN (" + placeholders + ")",
+      Array.from(uidsInRoom)
     );
     for (const row of rows) {
       try {
@@ -374,33 +385,12 @@ app.put("/api/users/me/name", authMiddleware, async (req, res) => {
 app.put("/api/users/me/photo", authMiddleware, async (req, res) => {
   const { photo } = req.body;
   if (!photo) return res.status(400).json({ error: "Photo required" });
+  // Limit photo size to ~1MB (base64 is ~33% larger than raw bytes)
+  if (photo.length > 1_400_000) return res.status(400).json({ error: "Photo too large (max ~1MB)" });
   try {
     await pool.query("UPDATE users SET photo = $1 WHERE id = $2", [photo, req.uid]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ---- PUSH SUBSCRIPTION ----
-app.get("/api/vapid-public-key", (req, res) => {
-  res.send(VAPID_PUBLIC_KEY || "");
-});
-
-app.post("/api/users/push-subscribe", authMiddleware, async (req, res) => {
-  const sub = req.body;
-  if (!sub || !sub.endpoint) return res.status(400).json({ error: "Invalid subscription" });
-  try {
-    const keys = sub.keys || {};
-    await pool.query(
-      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (user_id) DO UPDATE
-       SET endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
-      [req.uid, sub.endpoint, keys.p256dh, keys.auth]
-    );
-    res.status(201).json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ---- ROOM MESSAGES ----
@@ -423,7 +413,7 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
 app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   const chatId = req.params.chatId;
   const uids = chatId.split("_");
-  if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
+  if (uids.length !== 2 || !uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const { rows } = await pool.query(
       `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at, m.read_at,
@@ -627,7 +617,7 @@ app.get("/api/push/public-key", (req, res) => {
 app.post("/api/dms/:chatId/read", authMiddleware, async (req, res) => {
   const chatId = req.params.chatId;
   const uids = chatId.split("_");
-  if (!uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
+  if (uids.length !== 2 || !uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const result = await pool.query(
       `UPDATE dm_messages SET read_at = NOW()
@@ -820,7 +810,9 @@ io.on("connection", (socket) => {
 
   socket.on("join_dm", (chatId) => {
     const user = connectedUsers.get(socket.id);
-    if (!user || !chatId || typeof chatId !== "string" || !chatId.split("_").includes(user.uid)) return;
+    if (!user || !chatId || typeof chatId !== "string") return;
+    const dmParts = chatId.split("_");
+    if (dmParts.length !== 2 || !dmParts.includes(user.uid)) return;
     socket.rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("dm_" + chatId);
   });
@@ -851,7 +843,8 @@ io.on("connection", (socket) => {
   socket.on("send_dm", async ({ chatId, text }) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
-    if (!chatId.split("_").includes(user.uid)) return;
+    const dmUids = chatId.split("_");
+    if (dmUids.length !== 2 || !dmUids.includes(user.uid)) return;
     if (containsBadWord(text.trim())) {
       socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
       return;
@@ -869,8 +862,7 @@ io.on("connection", (socket) => {
       };
       io.to("dm_" + chatId).emit("new_dm", dmMsg);
       // Push notification + socket notify to recipient
-      const parts = chatId.split("_");
-      const recipientUid = parts[0] === user.uid ? parts[1] : parts[0];
+      const recipientUid = dmUids[0] === user.uid ? dmUids[1] : dmUids[0];
       sendPushToUser(recipientUid, user.name, rows[0].text);
       // Emit dm_notify to recipient's socket(s) for in-app toast
       for (const [socketId, u] of connectedUsers.entries()) {
@@ -914,14 +906,6 @@ io.on("connection", (socket) => {
       });
     }
     user.theriotype = data.theriotype;
-  });
-
-  socket.on("disconnect", () => {
-    const user = connectedUsers.get(socket.id);
-    if (user) {
-      pool.query("UPDATE users SET last_seen = NOW() WHERE id = $1", [user.uid]).catch(() => { });
-      connectedUsers.delete(socket.id);
-    }
   });
 });
 

@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS dm_messages (
   chat_id     TEXT NOT NULL,           -- uid1_uid2 sorted
   user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   text        TEXT NOT NULL CHECK (char_length(text) <= 500),
-  created_at  TIMESTAMPTZ DEFAULT NOW()
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  read_at     TIMESTAMPTZ DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dm_messages_chat ON dm_messages(chat_id, created_at);
 
@@ -58,4 +59,13 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   p256dh      TEXT NOT NULL,
   auth        TEXT NOT NULL,
   created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS friend_requests (
+  id          SERIAL PRIMARY KEY,
+  from_uid    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_uid      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status      TEXT DEFAULT 'pending',
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(from_uid, to_uid)
 );
