@@ -80,6 +80,8 @@ if (process.env.DATABASE_URL) {
     UNIQUE(from_uid, to_uid)
   )`).catch(() => { });
   pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ DEFAULT NULL`).catch(() => { });
+  pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to INTEGER DEFAULT NULL`).catch(() => { });
+  pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS reply_to INTEGER DEFAULT NULL`).catch(() => { });
 } else {
   console.warn("WARN: DATABASE_URL not configured");
 }
@@ -399,9 +401,12 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
   if (!VALID_ROOMS.includes(roomId)) return res.status(400).json({ error: "Invalid room" });
   try {
     const { rows } = await pool.query(
-      `SELECT m.id, m.room_id, m.user_id, m.text, m.created_at,
-              u.name, u.photo, u.premium, u.theriotype
+      `SELECT m.id, m.room_id, m.user_id, m.text, m.created_at, m.reply_to,
+              u.name, u.photo, u.premium, u.theriotype,
+              rm.text AS reply_text, ru.name AS reply_name
        FROM messages m JOIN users u ON u.id = m.user_id
+       LEFT JOIN messages rm ON rm.id = m.reply_to
+       LEFT JOIN users ru ON ru.id = rm.user_id
        WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
       [roomId]
     );
@@ -416,9 +421,12 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
   if (uids.length !== 2 || !uids.includes(req.uid)) return res.status(403).json({ error: "Access denied" });
   try {
     const { rows } = await pool.query(
-      `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at, m.read_at,
-              u.name, u.photo, u.premium, u.theriotype
+      `SELECT m.id, m.chat_id, m.user_id, m.text, m.created_at, m.read_at, m.reply_to,
+              u.name, u.photo, u.premium, u.theriotype,
+              rm.text AS reply_text, ru.name AS reply_name
        FROM dm_messages m JOIN users u ON u.id = m.user_id
+       LEFT JOIN dm_messages rm ON rm.id = m.reply_to
+       LEFT JOIN users ru ON ru.id = rm.user_id
        WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
       [chatId]
     );
@@ -817,7 +825,7 @@ io.on("connection", (socket) => {
     socket.join("dm_" + chatId);
   });
 
-  socket.on("send_message", async ({ roomId, text }) => {
+  socket.on("send_message", async ({ roomId, text, replyTo }) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (!VALID_ROOMS.includes(roomId)) return;
@@ -826,21 +834,28 @@ io.on("connection", (socket) => {
       return;
     }
     try {
+      const replyId = replyTo && Number.isInteger(Number(replyTo)) ? Number(replyTo) : null;
       const { rows } = await pool.query(
-        `INSERT INTO messages (room_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *`,
-        [roomId, user.uid, text.trim()]
+        `INSERT INTO messages (room_id, user_id, text, reply_to, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING *`,
+        [roomId, user.uid, text.trim(), replyId]
       );
+      let replyData = null;
+      if (replyId) {
+        const rr = await pool.query(`SELECT m.id, m.text, u.name FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = $1`, [replyId]);
+        if (rr.rows.length) replyData = { id: rr.rows[0].id, text: rr.rows[0].text, name: rr.rows[0].name };
+      }
       io.to("room_" + roomId).emit("new_message", {
         id: rows[0].id, room_id: roomId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
         theriotype: user.theriotype || "",
-        text: rows[0].text, created_at: rows[0].created_at
+        text: rows[0].text, created_at: rows[0].created_at,
+        reply_to: replyId, reply: replyData
       });
       sendPushToRoom(roomId, user.uid, `${user.name}: ${rows[0].text}`);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
-  socket.on("send_dm", async ({ chatId, text }) => {
+  socket.on("send_dm", async ({ chatId, text, replyTo }) => {
     const user = connectedUsers.get(socket.id);
     if (!user || !chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
     const dmUids = chatId.split("_");
@@ -850,15 +865,22 @@ io.on("connection", (socket) => {
       return;
     }
     try {
+      const replyId = replyTo && Number.isInteger(Number(replyTo)) ? Number(replyTo) : null;
       const { rows } = await pool.query(
-        `INSERT INTO dm_messages (chat_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *`,
-        [chatId, user.uid, text.trim()]
+        `INSERT INTO dm_messages (chat_id, user_id, text, reply_to, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING *`,
+        [chatId, user.uid, text.trim(), replyId]
       );
+      let replyData = null;
+      if (replyId) {
+        const rr = await pool.query(`SELECT m.id, m.text, u.name FROM dm_messages m JOIN users u ON u.id = m.user_id WHERE m.id = $1`, [replyId]);
+        if (rr.rows.length) replyData = { id: rr.rows[0].id, text: rr.rows[0].text, name: rr.rows[0].name };
+      }
       const dmMsg = {
         id: rows[0].id, chat_id: chatId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
         theriotype: user.theriotype || "",
-        text: rows[0].text, created_at: rows[0].created_at
+        text: rows[0].text, created_at: rows[0].created_at,
+        reply_to: replyId, reply: replyData
       };
       io.to("dm_" + chatId).emit("new_dm", dmMsg);
       // Push notification + socket notify to recipient
