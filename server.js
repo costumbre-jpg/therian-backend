@@ -398,7 +398,19 @@ app.patch("/api/users/me", authMiddleware, async (req, res) => {
   if (desc !== undefined && typeof desc === "string" && desc.length > 200) {
     return res.status(400).json({ error: "Description too long (max 200)" });
   }
-  const validTheriotypes = ["", "wolf", "cat", "fox", "bird", "dragon", "bear", "deer", "other"];
+  const validTheriotypes = [
+    "",
+    // Therian
+    "wolf", "cat", "fox", "bird", "dragon", "bear", "deer", "other",
+    // Social Media
+    "facebook", "instagram", "tiktok", "twitter", "youtube", "linkedin",
+    // Programming
+    "languages", "web", "mobile", "databases", "ai", "devops", "security",
+    // Music
+    "pop", "rock", "latina", "jazz", "electronica", "clasica", "hiphop", "internacional",
+    // Anime
+    "shonen", "shojo", "seinen", "isekai", "mecha", "sliceoflife", "otaku"
+  ];
   if (theriotype !== undefined && !validTheriotypes.includes(theriotype)) {
     return res.status(400).json({ error: "Invalid theriotype" });
   }
