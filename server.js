@@ -455,9 +455,10 @@ app.get("/api/rooms/:roomId/messages", authMiddleware, async (req, res) => {
        FROM messages m JOIN users u ON u.id = m.user_id
        LEFT JOIN messages rm ON rm.id = m.reply_to
        LEFT JOIN users ru ON ru.id = rm.user_id
-       WHERE m.room_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
+       WHERE m.room_id = $1 ORDER BY m.created_at DESC LIMIT 3000`,
       [roomId]
     );
+    rows.reverse(); // So frontend receives them in chronological order
     console.log(`[messages] room=${roomId} uid=${req.uid} rows=${rows.length}`);
     res.json(rows);
   } catch (err) {
@@ -479,9 +480,10 @@ app.get("/api/dms/:chatId/messages", authMiddleware, async (req, res) => {
        FROM dm_messages m JOIN users u ON u.id = m.user_id
        LEFT JOIN dm_messages rm ON rm.id = m.reply_to
        LEFT JOIN users ru ON ru.id = rm.user_id
-       WHERE m.chat_id = $1 ORDER BY m.created_at ASC LIMIT 500`,
+       WHERE m.chat_id = $1 ORDER BY m.created_at DESC LIMIT 3000`,
       [chatId]
     );
+    rows.reverse();
 
     // Mark messages as read automatically when history is fetched by recipient
     const result = await pool.query(
