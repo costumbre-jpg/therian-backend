@@ -902,7 +902,8 @@ io.on("connection", (socket) => {
     console.log("Socket", socket.id, "joined dm_" + chatId);
   });
 
-  socket.on("send_message", async ({ roomId, text, replyTo }) => {
+  socket.on("send_message", async (data) => {
+    const { roomId, text, replyTo } = data;
     const user = connectedUsers.get(socket.id);
     if (!user) { socket.emit("message_error", "Not authenticated yet. Please wait a moment."); return; }
     if (!roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
@@ -923,6 +924,7 @@ io.on("connection", (socket) => {
         if (rr.rows.length) replyData = { id: rr.rows[0].id, text: rr.rows[0].text, name: rr.rows[0].name };
       }
       io.to("room_" + roomId).emit("new_message", {
+        tempId: data.tempId,
         id: rows[0].id, room_id: roomId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
         theriotype: user.theriotype || "",
@@ -933,7 +935,8 @@ io.on("connection", (socket) => {
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
-  socket.on("send_dm", async ({ chatId, text, replyTo }) => {
+  socket.on("send_dm", async (data) => {
+    const { chatId, text, replyTo } = data;
     const user = connectedUsers.get(socket.id);
     if (!user) { socket.emit("message_error", "Not authenticated yet. Please wait a moment."); return; }
     if (!chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
@@ -959,7 +962,8 @@ io.on("connection", (socket) => {
         name: user.name, photo: user.photo, premium: user.premium,
         theriotype: user.theriotype || "",
         text: rows[0].text, created_at: rows[0].created_at,
-        reply_to: replyId, reply: replyData
+        reply_to: replyId, reply: replyData,
+        tempId: data.tempId
       };
       io.to("dm_" + chatId).emit("new_dm", dmMsg);
       // Push notification + socket notify to recipient
