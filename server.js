@@ -151,7 +151,7 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 
 // ---- PUSH NOTIFICATION HELPERS ----
 async function sendPushToUser(recipientUid, title, body) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) { console.log('Push: VAPID keys not configured, skipping'); return; }
+  if (!vapidConfigured) { console.log('Push: VAPID not configured, skipping'); return; }
   try {
     const { rows } = await pool.query(
       "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1",
@@ -179,7 +179,7 @@ async function sendPushToUser(recipientUid, title, body) {
 }
 
 async function sendPushToRoom(roomId, senderUid, body) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  if (!vapidConfigured) return;
   try {
     // Collect UIDs of ALL currently-connected users (they get real-time via socket)
     const onlineUids = new Set();
@@ -364,7 +364,7 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
               );
             } catch (e) {
               if (e.statusCode === 410 || e.statusCode === 404) {
-                await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => {});
+                await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => { });
               }
             }
           }
@@ -682,15 +682,13 @@ app.get("/api/push/public-key", (req, res) => {
 // ---- UNREAD DMS (for checking on login) ----
 app.get("/api/dms/unread", authMiddleware, async (req, res) => {
   try {
+    const safeUid = req.uid.replace(/_/g, '\\_');
     const { rows } = await pool.query(
       `SELECT DISTINCT chat_id, user_id AS from_uid
        FROM dm_messages
-       WHERE chat_id LIKE $1 AND user_id != $2 AND read_at IS NULL
-       UNION
-       SELECT DISTINCT chat_id, user_id AS from_uid
-       FROM dm_messages
-       WHERE chat_id LIKE $3 AND user_id != $2 AND read_at IS NULL`,
-      [req.uid + '_%', req.uid, '%_' + req.uid]
+       WHERE (chat_id LIKE $1 ESCAPE '\\' OR chat_id LIKE $3 ESCAPE '\\')
+         AND user_id != $2 AND read_at IS NULL`,
+      [safeUid + '\\_%', req.uid, '%\\_' + safeUid]
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }

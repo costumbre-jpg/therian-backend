@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS messages (
   room_id TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   text TEXT NOT NULL CHECK (char_length(text) <= 500),
+  reply_to INTEGER DEFAULT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id, created_at);
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS dm_messages (
   chat_id TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   text TEXT NOT NULL CHECK (char_length(text) <= 500),
+  read_at TIMESTAMPTZ DEFAULT NULL,
+  reply_to INTEGER DEFAULT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_dm_messages_chat ON dm_messages(chat_id, created_at);
