@@ -53,6 +53,14 @@ if (process.env.DATABASE_URL) {
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE`).catch(() => { });
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS desc_text TEXT DEFAULT ''`).catch(() => { });
   pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS theriotype TEXT DEFAULT ''`).catch(() => { });
+  // XP + Levels system columns
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS xp INTEGER DEFAULT 0`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS level INTEGER DEFAULT 0`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS login_streak INTEGER DEFAULT 0`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_date DATE DEFAULT NULL`).catch(() => { });
+  // Smart moderation: toxicity score
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS toxicity_score INTEGER DEFAULT 0`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ DEFAULT NULL`).catch(() => { });
   pool.query(`CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
     msg_id TEXT,
@@ -86,23 +94,306 @@ if (process.env.DATABASE_URL) {
   console.warn("WARN: DATABASE_URL not configured");
 }
 
-// ---- WORD FILTER ----
+// ============================================
+// SMART MODERATION SYSTEM
+// ============================================
 const BAD_WORDS = [
   // Hate speech / death threats
-  "kill yourself", "kys", "go die", "you should die", "i hope you die", "mátate", "suicídate", "espero que te mueras",
+  "kill yourself", "kys", "go die", "you should die", "i hope you die", "matate", "suicidate", "espero que te mueras",
   // Slurs (EN)
   "faggot", "nigger", "nigga", "retard", "retarded",
   // Slurs (ES)
-  "maricón", "maricon", "negro de mierda", "puto imbécil",
+  "maricon", "negro de mierda", "puto imbecil",
   // Harassment
-  "rape", "pedophile", "pedo", "violación", "violacion",
+  "rape", "pedophile", "pedo", "violacion",
   // Extreme insults
   "go fuck yourself", "fuck you", "hijo de puta", "hdp", "me cago en tu madre"
 ];
 
-function containsBadWord(text) {
-  const lower = text.toLowerCase();
-  return BAD_WORDS.some(w => lower.includes(w));
+// Leetspeak normalization map
+const LEET_MAP = { '@': 'a', '4': 'a', '3': 'e', '1': 'i', '!': 'i', '0': 'o', '$': 's', '5': 's', '7': 't', '+': 't', '¡': 'i' };
+
+function normalizeLeet(text) {
+  let result = '';
+  for (let i = 0; i < text.length; i++) {
+    result += LEET_MAP[text[i]] || text[i];
+  }
+  return result;
+}
+
+function removeSpaceTricks(text) {
+  // Remove dots, dashes, underscores, extra spaces between single chars: "f u c k" → "fuck"
+  return text.replace(/([a-zA-Z])\s*[.\-_]*\s*(?=[a-zA-Z])/g, '$1');
+}
+
+// In-memory flood + repetition tracking
+const _userMsgTimestamps = new Map(); // uid → [timestamp, ...]
+const _userLastMessages = new Map();  // uid → [text, text, text]
+
+function checkModeration(text, uid) {
+  const now = Date.now();
+  const trimmed = text.trim();
+
+  // 1. Flood detection: >5 messages in 10 seconds
+  const timestamps = _userMsgTimestamps.get(uid) || [];
+  const recent = timestamps.filter(t => now - t < 10000);
+  recent.push(now);
+  _userMsgTimestamps.set(uid, recent.slice(-10)); // keep last 10
+  if (recent.length > 5) {
+    return { blocked: true, reason: "⚠️ Slow down! You're sending messages too fast." };
+  }
+
+  // 2. Repetitive message detection: same text 3 times in a row
+  const lastMsgs = _userLastMessages.get(uid) || [];
+  lastMsgs.push(trimmed.toLowerCase());
+  if (lastMsgs.length > 3) lastMsgs.shift();
+  _userLastMessages.set(uid, lastMsgs);
+  if (lastMsgs.length >= 3 && lastMsgs.every(m => m === lastMsgs[0])) {
+    return { blocked: true, reason: "⚠️ Please don't repeat the same message." };
+  }
+
+  // 3. Bad word check with leetspeak + space normalization
+  const lower = trimmed.toLowerCase();
+  const normalized = normalizeLeet(lower);
+  const noSpaces = removeSpaceTricks(normalized);
+
+  const textsToCheck = [lower, normalized, noSpaces];
+  for (const t of textsToCheck) {
+    if (BAD_WORDS.some(w => t.includes(w))) {
+      return { blocked: true, reason: "Your message was blocked for containing prohibited content." };
+    }
+  }
+
+  return { blocked: false };
+}
+
+// Increment toxicity score in DB
+async function _incrementToxicity(uid) {
+  try {
+    const result = await pool.query(
+      `UPDATE users SET toxicity_score = COALESCE(toxicity_score, 0) + 1 WHERE id = $1 RETURNING toxicity_score`,
+      [uid]
+    );
+    const score = result.rows[0]?.toxicity_score || 0;
+    if (score >= 10 && score < 20) {
+      // Auto-mute for 1 hour
+      await pool.query(`UPDATE users SET muted_until = NOW() + INTERVAL '1 hour' WHERE id = $1`, [uid]);
+      console.log(`[moderation] User ${uid} auto-muted for 1 hour (toxicity: ${score})`);
+    } else if (score >= 20) {
+      console.log(`[moderation] User ${uid} flagged for admin review (toxicity: ${score})`);
+    }
+  } catch (e) { console.error('[moderation] toxicity update error:', e.message); }
+}
+
+// Check if user is muted
+async function _isUserMuted(uid) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT muted_until FROM users WHERE id = $1 AND muted_until > NOW()`, [uid]
+    );
+    return rows.length > 0;
+  } catch (e) { return false; }
+}
+
+// ============================================
+// XP + LEVELS SYSTEM
+// ============================================
+function calculateLevel(xp) {
+  return Math.floor(Math.sqrt((xp || 0) / 50));
+}
+
+function xpForLevel(level) {
+  return level * level * 50;
+}
+
+async function _awardXP(uid, amount, socketId) {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE users SET xp = COALESCE(xp, 0) + $1 WHERE id = $2 RETURNING xp, level`,
+      [amount, uid]
+    );
+    if (!rows.length) return;
+    const newXP = rows[0].xp;
+    const newLevel = calculateLevel(newXP);
+    const oldLevel = rows[0].level || 0;
+
+    // Update level if changed
+    if (newLevel !== oldLevel) {
+      await pool.query(`UPDATE users SET level = $1 WHERE id = $2`, [newLevel, uid]);
+    }
+
+    // Emit XP update to user's socket(s)
+    for (const [sid, u] of connectedUsers.entries()) {
+      if (u.uid === uid) {
+        io.to(sid).emit('xp_update', {
+          xp: newXP,
+          level: newLevel,
+          gained: amount,
+          levelUp: newLevel > oldLevel ? newLevel : null,
+          nextLevelXP: xpForLevel(newLevel + 1),
+          progress: Math.round(((newXP - xpForLevel(newLevel)) / (xpForLevel(newLevel + 1) - xpForLevel(newLevel))) * 100)
+        });
+      }
+    }
+  } catch (e) { console.error('[xp] error:', e.message); }
+}
+
+// ============================================
+// ROOM ACTIVITY TRACKER (Radar Social)
+// ============================================
+const _roomActivity = new Map(); // roomId → { timestamps: [ts,...], lastMsg: ts }
+
+function _trackRoomMessage(roomId) {
+  const now = Date.now();
+  if (!_roomActivity.has(roomId)) {
+    _roomActivity.set(roomId, { timestamps: [], lastMsg: now });
+  }
+  const data = _roomActivity.get(roomId);
+  data.timestamps.push(now);
+  data.lastMsg = now;
+  // Keep only last 5 minutes of timestamps
+  const fiveMinAgo = now - 300000;
+  data.timestamps = data.timestamps.filter(t => t > fiveMinAgo);
+}
+
+function _getRoomActivityStats() {
+  const now = Date.now();
+  const fiveMinAgo = now - 300000;
+  const stats = {};
+  for (const roomId of VALID_ROOMS) {
+    const data = _roomActivity.get(roomId);
+    if (data) {
+      const recentMsgs = data.timestamps.filter(t => t > fiveMinAgo).length;
+      stats[roomId] = {
+        msgs_5min: recentMsgs,
+        is_hot: recentMsgs >= 3,
+        last_msg_ago: Math.round((now - data.lastMsg) / 1000) // seconds ago
+      };
+    } else {
+      stats[roomId] = { msgs_5min: 0, is_hot: false, last_msg_ago: -1 };
+    }
+  }
+  // Add online count per room from socket rooms
+  try {
+    for (const roomId of VALID_ROOMS) {
+      const room = io.sockets.adapter.rooms.get('room_' + roomId);
+      stats[roomId].online = room ? room.size : 0;
+    }
+  } catch (e) { }
+  return stats;
+}
+
+// ============================================
+// ICEBREAKER BOT
+// ============================================
+const ICEBREAKER_QUESTIONS = {
+  // Therian world
+  general: [
+    "🐾 If you could be any animal for a day, what would you choose?",
+    "🌙 What's your favorite thing about being part of the therian community?",
+    "🐺 What's the most interesting thing you've learned about your theriotype?",
+    "🌿 Do you feel more connected to nature or the city? Why?",
+    "🦊 If your theriotype could talk, what would they say right now?",
+    "🎭 How did you first discover you were a therian?",
+    "🌟 What superpower would your theriotype have?"
+  ],
+  wolves: ["🐺 What's your favorite wolf fact?", "🐺 Lone wolf or pack wolf? Why?", "🐺 Favorite wolf species?"],
+  cats: ["🐱 Indoor or outdoor cat vibes?", "🐱 Big cats or small cats?", "🐱 What's the most cat thing you've done today?"],
+  foxes: ["🦊 What's your fox spirit energy today?", "🦊 Arctic fox or red fox?", "🦊 Foxes are clever — what's your best life hack?"],
+  birds: ["🐦 If you could fly anywhere right now, where?", "🐦 Favorite bird song?", "🐦 Dawn chorus or sunset flight?"],
+  dragons: ["🐉 Fire, ice, or storm dragon?", "🐉 What would your dragon hoard be?", "🐉 If you had wings, where would you fly first?"],
+  bears: ["🐻 Hibernate or adventure?", "🐻 Favorite season and why?", "🐻 Honey or fish? 😄"],
+  deer: ["🦌 Forest or meadow?", "🦌 What makes you feel at peace?", "🦌 Spring vibes — what are you grateful for today?"],
+  vent: ["💭 How are you feeling today? No judgment here.", "💭 What's one thing you'd like to get off your chest?", "💭 Remember: it's okay to not be okay. We're here for you."],
+
+  // Music world
+  music_pop: ["🎤 What song is stuck in your head right now?", "🎤 If you could attend any concert, past or present?", "🎤 Guilty pleasure song?"],
+  music_rock: ["🎸 Classic rock or modern rock?", "🎸 Best guitar solo ever?", "🎸 Favorite rock band of all time?"],
+  music_latina: ["💃 Reggaeton, salsa, or bachata?", "💃 Favorite Latino artist?", "💃 What song makes you dance every time?"],
+  music_jazz: ["🎷 Smooth jazz or bebop?", "🎷 Favorite jazz instrument?", "🎷 Miles Davis or John Coltrane?"],
+  music_electronica: ["🎧 Favorite DJ or producer?", "🎧 Festival you'd love to attend?", "🎧 Best drop you've ever heard?"],
+  music_clasica: ["🎻 Beethoven or Mozart?", "🎻 Favorite symphony?", "🎻 Do you play any classical instrument?"],
+  music_hiphop: ["🎤 Old school or new school hip-hop?", "🎤 Favorite rapper alive?", "🎤 Best hip-hop album ever?"],
+  music_internacional: ["🌍 What's the best music from your country?", "🌍 Favorite non-English song?", "🌍 Music connects the world — what song proves it?"],
+
+  // Anime world
+  anime_shonen: ["⚔️ Naruto, One Piece, or Dragon Ball?", "⚔️ Best shonen fight scene ever?", "⚔️ Who's the strongest anime character?"],
+  anime_shojo: ["🌸 Favorite romance anime?", "🌸 Best anime couple?", "🌸 Fruits Basket or Ouran?"],
+  anime_seinen: ["🌑 Attack on Titan or Vinland Saga?", "🌑 Darkest anime you've watched?", "🌑 Manga or anime — which is better?"],
+  anime_isekai: ["✨ If you were isekai'd, what power would you want?", "✨ Best isekai world to live in?", "✨ Sword Art Online or Re:Zero?"],
+  anime_mecha: ["🤖 Gundam or Evangelion?", "🤖 Coolest mecha design ever?", "🤖 Would you pilot a giant robot?"],
+  anime_sliceoflife: ["☕ Favorite cozy anime?", "☕ What anime world would you live in?", "☕ Best anime food scene?"],
+  anime_otaku: ["🎌 How many anime have you watched?", "🎌 Favorite anime opening?", "🎌 Sub or dub?"],
+
+  // Social world
+  social_facebook: ["📘 Is Facebook still relevant? Why or why not?", "📘 Best Facebook memory?", "📘 Groups or pages — which is better?"],
+  social_instagram: ["📸 Reels or stories?", "📸 How do you curate your feed?", "📸 Favorite type of content to post?"],
+  social_tiktok: ["🎵 Favorite TikTok trend?", "🎵 Has TikTok changed how you consume content?", "🎵 FYP algorithm — blessing or curse?"],
+  social_twitter: ["🐦 X or Twitter? What do you call it?", "🐦 Best tweet you've ever seen?", "🐦 Threads vs tweets?"],
+  social_youtube: ["▶️ Favorite YouTuber?", "▶️ Shorts or long-form content?", "▶️ What's in your Watch Later?"],
+  social_linkedin: ["💼 Real networking or just a show?", "💼 Best career advice you've received?", "💼 Do you actually use LinkedIn?"],
+  social_emerging: ["✨ What's the next big social platform?", "✨ Decentralized social media — future or fad?", "✨ What feature do you wish existed?"],
+
+  // Prog world
+  prog_languages: ["💻 Favorite programming language and why?", "💻 Tabs or spaces?", "💻 What language are you learning next?"],
+  prog_web: ["🌐 React, Vue, or Angular?", "🌐 Frontend or backend?", "🌐 Best website you've seen recently?"],
+  prog_mobile: ["📱 iOS or Android development?", "📱 Native or cross-platform?", "📱 What app idea do you have?"],
+  prog_databases: ["🗄️ SQL or NoSQL?", "🗄️ Favorite database?", "🗄️ Have you ever lost data? Tell the story."],
+  prog_ai: ["🤖 Is AI going to replace programmers?", "🤖 Coolest AI project you've seen?", "🤖 ChatGPT, Claude, or Gemini?"],
+  prog_devops: ["⚙️ Docker or Kubernetes?", "⚙️ CI/CD pipeline tips?", "⚙️ Worst deployment disaster?"],
+  prog_security: ["🔐 Have you ever been hacked?", "🔐 Best security practice?", "🔐 Ethical hacking — have you tried it?"]
+};
+
+const _roomLastActivity = new Map(); // roomId → timestamp
+
+function _startIcebreakerTimer() {
+  setInterval(() => {
+    const now = Date.now();
+    const IDLE_THRESHOLD = 15 * 60 * 1000; // 15 minutes
+
+    for (const roomId of VALID_ROOMS) {
+      const lastActivity = _roomLastActivity.get(roomId) || 0;
+      if (now - lastActivity < IDLE_THRESHOLD) continue;
+
+      // Check if anyone is in this room
+      const room = io.sockets.adapter.rooms.get('room_' + roomId);
+      if (!room || room.size === 0) continue;
+
+      // Pick a random question for this room
+      const questions = ICEBREAKER_QUESTIONS[roomId] || ICEBREAKER_QUESTIONS.general;
+      const question = questions[Math.floor(Math.random() * questions.length)];
+
+      // Send as system message (NOT saved to DB — ephemeral)
+      io.to('room_' + roomId).emit('new_message', {
+        id: 'icebreaker-' + Date.now(),
+        room_id: roomId,
+        user_id: 'system',
+        name: 'QIURE Bot',
+        photo: '',
+        premium: false,
+        theriotype: '',
+        text: question,
+        created_at: new Date().toISOString(),
+        is_system: true,
+        sys_type: 'icebreaker'
+      });
+
+      // Mark this room as having received an icebreaker
+      _roomLastActivity.set(roomId, now);
+      console.log(`[icebreaker] Sent to room ${roomId}: ${question}`);
+    }
+  }, 5 * 60 * 1000); // Check every 5 minutes
+}
+
+// Start the room activity broadcast (every 30 seconds)
+function _startActivityBroadcast() {
+  setInterval(() => {
+    const stats = _getRoomActivityStats();
+    // Only broadcast if there are connected users
+    if (connectedUsers.size > 0) {
+      io.emit('room_activity', stats);
+    }
+  }, 30000);
 }
 
 // ---- WEB3FORMS REPORT EMAIL ----
@@ -388,6 +679,28 @@ app.get("/api/users/me", authMiddleware, async (req, res) => {
     const user = rows[0];
     user.is_admin = !!(ADMIN_UID && req.uid === ADMIN_UID);
     user.desc = user.desc_text || "";
+    user.xp = user.xp || 0;
+    user.level = calculateLevel(user.xp);
+    // Daily login XP + streak
+    const today = new Date().toISOString().slice(0, 10);
+    const lastLogin = user.last_login_date ? new Date(user.last_login_date).toISOString().slice(0, 10) : null;
+    if (lastLogin !== today) {
+      let streak = user.login_streak || 0;
+      if (lastLogin) {
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        streak = (lastLogin === yesterday) ? streak + 1 : 1;
+      } else {
+        streak = 1;
+      }
+      const dailyXP = 10 + (Math.min(streak, 7) * 5); // 10 base + up to 35 streak bonus
+      await pool.query(
+        `UPDATE users SET last_login_date = CURRENT_DATE, login_streak = $1 WHERE id = $2`,
+        [streak, req.uid]
+      );
+      _awardXP(req.uid, dailyXP, null);
+      user.login_streak = streak;
+      user.daily_xp_awarded = dailyXP;
+    }
     res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -637,6 +950,9 @@ app.post("/api/friend-requests/:id/accept", authMiddleware, async (req, res) => 
         io.to(socketId).emit("friend_accepted", { uid: req.uid, name: meRows[0]?.name || "Therian" });
       }
     }
+    // Award XP to both users for becoming friends
+    _awardXP(req.uid, 10, null);
+    _awardXP(fr.from_uid, 10, null);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -922,8 +1238,13 @@ io.on("connection", (socket) => {
     if (!user) { socket.emit("message_error", "Not authenticated yet. Please wait a moment."); return; }
     if (!roomId || typeof roomId !== "string" || !text || !text.trim() || text.length > 500) return;
     if (!VALID_ROOMS.includes(roomId)) return;
-    if (containsBadWord(text.trim())) {
-      socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
+    // Smart moderation check
+    const muted = await _isUserMuted(user.uid);
+    if (muted) { socket.emit("message_blocked", "⏳ You are temporarily muted. Try again later."); return; }
+    const modResult = checkModeration(text.trim(), user.uid);
+    if (modResult.blocked) {
+      socket.emit("message_blocked", modResult.reason);
+      _incrementToxicity(user.uid);
       return;
     }
     try {
@@ -937,15 +1258,21 @@ io.on("connection", (socket) => {
         const rr = await pool.query(`SELECT m.id, m.text, u.name FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = $1`, [replyId]);
         if (rr.rows.length) replyData = { id: rr.rows[0].id, text: rr.rows[0].text, name: rr.rows[0].name };
       }
+      // Get user level for the message
+      const userXP = await pool.query(`SELECT xp FROM users WHERE id = $1`, [user.uid]);
+      const userLevel = calculateLevel(userXP.rows[0]?.xp || 0);
       io.to("room_" + roomId).emit("new_message", {
         tempId: data.tempId,
         id: rows[0].id, room_id: roomId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
-        theriotype: user.theriotype || "",
+        theriotype: user.theriotype || "", level: userLevel,
         text: rows[0].text, created_at: rows[0].created_at,
         reply_to: replyId, reply: replyData
       });
-      // No push for room messages — push is only for DMs, friend requests and new users
+      // Track room activity + award XP
+      _trackRoomMessage(roomId);
+      _roomLastActivity.set(roomId, Date.now());
+      _awardXP(user.uid, 2, socket.id);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -956,8 +1283,13 @@ io.on("connection", (socket) => {
     if (!chatId || typeof chatId !== "string" || !text || !text.trim() || text.length > 500) return;
     const dmUids = chatId.split("_");
     if (dmUids.length !== 2 || !dmUids.includes(user.uid)) return;
-    if (containsBadWord(text.trim())) {
-      socket.emit("message_blocked", "Your message was blocked for containing prohibited content.");
+    // Smart moderation check
+    const muted = await _isUserMuted(user.uid);
+    if (muted) { socket.emit("message_blocked", "⏳ You are temporarily muted. Try again later."); return; }
+    const modResult = checkModeration(text.trim(), user.uid);
+    if (modResult.blocked) {
+      socket.emit("message_blocked", modResult.reason);
+      _incrementToxicity(user.uid);
       return;
     }
     try {
@@ -971,10 +1303,13 @@ io.on("connection", (socket) => {
         const rr = await pool.query(`SELECT m.id, m.text, u.name FROM dm_messages m JOIN users u ON u.id = m.user_id WHERE m.id = $1`, [replyId]);
         if (rr.rows.length) replyData = { id: rr.rows[0].id, text: rr.rows[0].text, name: rr.rows[0].name };
       }
+      // Get user level
+      const userXP = await pool.query(`SELECT xp FROM users WHERE id = $1`, [user.uid]);
+      const userLevel = calculateLevel(userXP.rows[0]?.xp || 0);
       const dmMsg = {
         id: rows[0].id, chat_id: chatId, user_id: user.uid,
         name: user.name, photo: user.photo, premium: user.premium,
-        theriotype: user.theriotype || "",
+        theriotype: user.theriotype || "", level: userLevel,
         text: rows[0].text, created_at: rows[0].created_at,
         reply_to: replyId, reply: replyData,
         tempId: data.tempId
@@ -993,6 +1328,8 @@ io.on("connection", (socket) => {
           });
         }
       }
+      // Award XP for DM
+      _awardXP(user.uid, 2, socket.id);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -1027,5 +1364,36 @@ io.on("connection", (socket) => {
     user.theriotype = data.theriotype;
   });
 });
+
+// ---- NEW API ENDPOINTS FOR ALGORITHMS ----
+
+// XP info endpoint
+app.get("/api/users/me/xp", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT xp, level, login_streak FROM users WHERE id = $1", [req.uid]);
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    const xp = rows[0].xp || 0;
+    const level = calculateLevel(xp);
+    const currentLevelXP = xpForLevel(level);
+    const nextLevelXP = xpForLevel(level + 1);
+    res.json({
+      xp, level,
+      streak: rows[0].login_streak || 0,
+      currentLevelXP,
+      nextLevelXP,
+      progress: Math.round(((xp - currentLevelXP) / (nextLevelXP - currentLevelXP)) * 100)
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Room activity endpoint
+app.get("/api/rooms/activity", authMiddleware, (req, res) => {
+  res.json(_getRoomActivityStats());
+});
+
+// Start background timers
+_startIcebreakerTimer();
+_startActivityBroadcast();
+console.log("[algorithms] Icebreaker bot + Activity broadcast started");
 
 server.listen(PORT, () => console.log("Therian backend running on port " + PORT));
