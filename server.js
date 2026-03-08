@@ -473,26 +473,6 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   console.warn("WARN: VAPID keys missing. Push disabled.");
 }
 
-// ---- PUSH SUBSCRIBE ENDPOINT ----
-app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
-  try {
-    const { endpoint, keys } = req.body;
-    if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
-      return res.status(400).json({ error: "Invalid subscription object" });
-    }
-    await pool.query(
-      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) 
-       VALUES ($1, $2, $3, $4) 
-       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4`,
-      [req.uid, endpoint, keys.p256dh, keys.auth]
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("Push subscribe error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ---- PUSH NOTIFICATION HELPERS ----
 async function sendPushToUser(recipientUid, title, body) {
   if (!vapidConfigured) { console.log('Push: VAPID not configured, skipping'); return; }
@@ -672,6 +652,26 @@ function adminMiddleware(req, res, next) {
   if (!ADMIN_UID || req.uid !== ADMIN_UID) return res.status(403).json({ error: "Not authorized" });
   next();
 }
+
+// ---- PUSH SUBSCRIBE ENDPOINT ----
+app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
+  try {
+    const { endpoint, keys } = req.body;
+    if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+      return res.status(400).json({ error: "Invalid subscription object" });
+    }
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) 
+       VALUES ($1, $2, $3, $4) 
+       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4`,
+      [req.uid, endpoint, keys.p256dh, keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Push subscribe error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================================
 // ROUTES
