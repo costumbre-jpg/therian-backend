@@ -90,6 +90,18 @@ if (process.env.DATABASE_URL) {
   pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ DEFAULT NULL`).catch(() => { });
   pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to INTEGER DEFAULT NULL`).catch(() => { });
   pool.query(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS reply_to INTEGER DEFAULT NULL`).catch(() => { });
+  // Daily missions table (auto-create)
+  pool.query(`CREATE TABLE IF NOT EXISTS user_mission_progress (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mission_key TEXT NOT NULL,
+    date_id TEXT NOT NULL,
+    progress INTEGER DEFAULT 0,
+    completed BOOLEAN DEFAULT false,
+    PRIMARY KEY (user_id, mission_key, date_id)
+  )`).catch(() => { });
+  // XP daily cap tracking column
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS xp_earned_today INTEGER DEFAULT 0`).catch(() => { });
+  pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS xp_today_date DATE DEFAULT NULL`).catch(() => { });
 } else {
   console.warn("WARN: DATABASE_URL not configured");
 }
@@ -206,8 +218,29 @@ function xpForLevel(level) {
   return level * level * 50;
 }
 
-async function _awardXP(uid, amount, socketId) {
+const DAILY_XP_CAP = 200; // Max XP from messages per day
+
+async function _awardXP(uid, amount, socketId, isMessageXP) {
   try {
+    // Daily XP cap for message-based XP
+    if (isMessageXP) {
+      const today = new Date().toISOString().slice(0, 10);
+      const { rows: capRows } = await pool.query(
+        `SELECT xp_earned_today, xp_today_date FROM users WHERE id = $1`, [uid]
+      );
+      if (capRows.length) {
+        const userDate = capRows[0].xp_today_date ? new Date(capRows[0].xp_today_date).toISOString().slice(0, 10) : null;
+        let earnedToday = (userDate === today) ? (capRows[0].xp_earned_today || 0) : 0;
+        if (earnedToday >= DAILY_XP_CAP) return; // Already hit daily cap
+        amount = Math.min(amount, DAILY_XP_CAP - earnedToday); // Don't exceed cap
+        if (amount <= 0) return;
+        await pool.query(
+          `UPDATE users SET xp_earned_today = $1, xp_today_date = CURRENT_DATE WHERE id = $2`,
+          [earnedToday + amount, uid]
+        );
+      }
+    }
+
     const { rows } = await pool.query(
       `UPDATE users SET xp = COALESCE(xp, 0) + $1 WHERE id = $2 RETURNING xp, level`,
       [amount, uid]
@@ -355,9 +388,9 @@ function _startIcebreakerTimer() {
       const lastActivity = _roomLastActivity.get(roomId) || 0;
       if (now - lastActivity < IDLE_THRESHOLD) continue;
 
-      // Check if anyone is in this room
+      // Check if at least 2 people are in this room (icebreaker needs an audience)
       const room = io.sockets.adapter.rooms.get('room_' + roomId);
-      if (!room || room.size === 0) continue;
+      if (!room || room.size < 2) continue;
 
       // Pick a random question for this room
       const questions = ICEBREAKER_QUESTIONS[roomId] || ICEBREAKER_QUESTIONS.general;
@@ -469,22 +502,38 @@ async function sendPushToUser(recipientUid, title, body) {
   }
 }
 
+// Track which rooms each user has joined (for scoped push notifications)
+const _userRoomMap = new Map(); // uid → roomId
+
 async function sendPushToRoom(roomId, senderUid, body) {
   if (!vapidConfigured) return;
   try {
-    // Collect UIDs of ALL currently-connected users (they get real-time via socket)
-    const onlineUids = new Set();
-    for (const [, u] of connectedUsers) {
-      onlineUids.add(u.uid);
+    // Collect UIDs of users who are currently in THIS room
+    const roomMemberUids = new Set();
+    const socketRoom = io.sockets.adapter.rooms.get('room_' + roomId);
+    if (socketRoom) {
+      for (const sid of socketRoom) {
+        const user = connectedUsers.get(sid);
+        if (user) roomMemberUids.add(user.uid);
+      }
     }
 
-    // Send push to every subscriber who is NOT currently online (offline users)
-    // and also to online users who are in the room but have the tab hidden
+    // Also include offline users who last visited this room (via _userRoomMap)
+    for (const [uid, lastRoom] of _userRoomMap.entries()) {
+      if (lastRoom === roomId) roomMemberUids.add(uid);
+    }
+
+    // Only send push to users who are in this room AND not the sender
+    if (roomMemberUids.size === 0) return;
+    const uidList = Array.from(roomMemberUids).filter(uid => uid !== senderUid);
+    if (uidList.length === 0) return;
+
+    // Batch query for subscriptions of relevant users only
     const { rows } = await pool.query(
-      "SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id != $1",
-      [senderUid]
+      `SELECT user_id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ANY($1)`,
+      [uidList]
     );
-    console.log('Push room: found', rows.length, 'subscription(s) for room', roomId, '(excluding sender', senderUid + ')');
+    console.log('Push room: found', rows.length, 'subscription(s) for room', roomId, '(relevant users only)');
     for (const row of rows) {
       try {
         const sub = {
@@ -496,11 +545,8 @@ async function sendPushToRoom(roomId, senderUid, body) {
           body: body,
           url: "/chat.html"
         }));
-        console.log('Push room: sent OK to user', row.user_id);
       } catch (err) {
-        console.error('Push room: error for user', row.user_id, err.statusCode, err.message);
         if (err.statusCode === 410 || err.statusCode === 404) {
-          console.log('Push room: removing expired subscription for user', row.user_id);
           await pool.query("DELETE FROM push_subscriptions WHERE user_id = $1", [row.user_id]).catch(() => { });
         }
       }
@@ -1175,6 +1221,109 @@ app.delete("/api/messages/:msgId", authMiddleware, async (req, res) => {
 // ============================================================
 const connectedUsers = new Map();
 
+// ---- QIURE MATCHMAKING QUEUE (improved with preference matching) ----
+let _matchQueue = [];
+const _recentMatches = new Map(); // uid → Set of matched uids (avoid repeats)
+
+function _findBestMatch(queue) {
+  if (queue.length < 2) return null;
+
+  // Try to match by same theriotype/preference first
+  for (let i = 0; i < queue.length; i++) {
+    for (let j = i + 1; j < queue.length; j++) {
+      const p1 = queue[i], p2 = queue[j];
+      // Check recent matches to avoid repeats
+      const p1Recent = _recentMatches.get(p1.uid) || new Set();
+      const p2Recent = _recentMatches.get(p2.uid) || new Set();
+      if (p1Recent.has(p2.uid) || p2Recent.has(p1.uid)) continue;
+
+      // Prefer same theriotype
+      if (p1.theriotype && p2.theriotype && p1.theriotype === p2.theriotype) {
+        queue.splice(j, 1); queue.splice(i, 1);
+        return [p1, p2];
+      }
+    }
+  }
+
+  // Fallback: match first two that haven't been matched recently
+  for (let i = 0; i < queue.length; i++) {
+    for (let j = i + 1; j < queue.length; j++) {
+      const p1 = queue[i], p2 = queue[j];
+      const p1Recent = _recentMatches.get(p1.uid) || new Set();
+      if (!p1Recent.has(p2.uid)) {
+        queue.splice(j, 1); queue.splice(i, 1);
+        return [p1, p2];
+      }
+    }
+  }
+
+  // Last resort: match first two regardless
+  return [queue.shift(), queue.shift()];
+}
+
+setInterval(async () => {
+  // Clean stale entries (>2 min in queue)
+  const now = Date.now();
+  _matchQueue = _matchQueue.filter(q => {
+    if (now - q.joinedAt > 120000) {
+      const s = io.sockets.sockets.get(q.socketId);
+      if (s) s.emit("match_timeout");
+      return false;
+    }
+    return true;
+  });
+
+  if (_matchQueue.length >= 2) {
+    const pair = _findBestMatch(_matchQueue);
+    if (!pair) return;
+    const [p1, p2] = pair;
+
+    const s1 = io.sockets.sockets.get(p1.socketId);
+    const s2 = io.sockets.sockets.get(p2.socketId);
+
+    if (!s1 || !connectedUsers.has(p1.socketId)) {
+      if (s2) _matchQueue.unshift(p2);
+      return;
+    }
+    if (!s2 || !connectedUsers.has(p2.socketId)) {
+      if (s1) _matchQueue.unshift(p1);
+      return;
+    }
+
+    // Track recent matches
+    if (!_recentMatches.has(p1.uid)) _recentMatches.set(p1.uid, new Set());
+    if (!_recentMatches.has(p2.uid)) _recentMatches.set(p2.uid, new Set());
+    _recentMatches.get(p1.uid).add(p2.uid);
+    _recentMatches.get(p2.uid).add(p1.uid);
+    // Clean old entries after 1 hour
+    setTimeout(() => {
+      const s1 = _recentMatches.get(p1.uid); if (s1) s1.delete(p2.uid);
+      const s2 = _recentMatches.get(p2.uid); if (s2) s2.delete(p1.uid);
+    }, 3600000);
+
+    const chatId = [p1.uid, p2.uid].sort().join("_");
+
+    try {
+      await pool.query(
+        "INSERT INTO dm_messages (chat_id, user_id, text, created_at) VALUES ($1, $2, $3, NOW())",
+        [chatId, "system", "⚡ QIURE Match! Say hi to your new friend!"]
+      );
+
+      const payload1 = { chatId, partner: { uid: p2.uid, name: p2.name, photo: p2.photo, theriotype: p2.theriotype } };
+      const payload2 = { chatId, partner: { uid: p1.uid, name: p1.name, photo: p1.photo, theriotype: p1.theriotype } };
+
+      io.to(p1.socketId).emit("match_found", payload1);
+      io.to(p2.socketId).emit("match_found", payload2);
+      // Award XP for matching
+      _awardXP(p1.uid, 5, p1.socketId, false);
+      _awardXP(p2.uid, 5, p2.socketId, false);
+      _incrementMissionProgress(p1.uid, 'make_friends', 1);
+      _incrementMissionProgress(p2.uid, 'make_friends', 1);
+      console.log(`Match made: ${p1.name} ↔ ${p2.name} (theriotype: ${p1.theriotype || 'any'}/${p2.theriotype || 'any'})`);
+    } catch (e) { console.error("Match DB error", e); }
+  }
+}, 3000);
+
 io.on("connection", (socket) => {
 
   socket.on("auth", (token) => {
@@ -1218,6 +1367,12 @@ io.on("connection", (socket) => {
     const rooms = Array.from(socket.rooms);
     rooms.forEach(r => { if (r !== socket.id) socket.leave(r); });
     socket.join("room_" + roomId);
+    // Track user's current room for scoped push notifications
+    const user = connectedUsers.get(socket.id);
+    if (user) {
+      _userRoomMap.set(user.uid, roomId);
+      _incrementMissionProgress(user.uid, 'visit_rooms', 1);
+    }
     console.log("Socket", socket.id, "joined room_" + roomId);
   });
 
@@ -1269,10 +1424,11 @@ io.on("connection", (socket) => {
         text: rows[0].text, created_at: rows[0].created_at,
         reply_to: replyId, reply: replyData
       });
-      // Track room activity + award XP
+      // Track room activity + award XP (with daily cap)
       _trackRoomMessage(roomId);
       _roomLastActivity.set(roomId, Date.now());
-      _awardXP(user.uid, 2, socket.id);
+      _awardXP(user.uid, 2, socket.id, true);
+      _incrementMissionProgress(user.uid, 'send_messages', 1);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -1328,8 +1484,9 @@ io.on("connection", (socket) => {
           });
         }
       }
-      // Award XP for DM
-      _awardXP(user.uid, 2, socket.id);
+      // Award XP for DM (with daily cap)
+      _awardXP(user.uid, 2, socket.id, true);
+      _incrementMissionProgress(user.uid, 'send_messages', 1);
     } catch (err) { socket.emit("message_error", err.message); }
   });
 
@@ -1363,6 +1520,25 @@ io.on("connection", (socket) => {
     }
     user.theriotype = data.theriotype;
   });
+
+  socket.on("matchmake_join", () => {
+    const user = connectedUsers.get(socket.id);
+    if (!user) return;
+    let existing = _matchQueue.findIndex(q => q.uid === user.uid);
+    if (existing === -1) {
+      _matchQueue.push({ socketId: socket.id, uid: user.uid, theriotype: user.theriotype, name: user.name, photo: user.photo, premium: user.premium, joinedAt: Date.now() });
+      console.log("Matchmaking joined:", user.name);
+      // Notify user of queue position
+      socket.emit("match_queue_status", { position: _matchQueue.length, total: _matchQueue.length });
+    }
+  });
+
+  socket.on("matchmake_cancel", () => {
+    const user = connectedUsers.get(socket.id);
+    if (!user) return;
+    _matchQueue = _matchQueue.filter(q => q.uid !== user.uid);
+    console.log("Matchmaking canceled:", user.name);
+  });
 });
 
 // ---- NEW API ENDPOINTS FOR ALGORITHMS ----
@@ -1389,6 +1565,104 @@ app.get("/api/users/me/xp", authMiddleware, async (req, res) => {
 // Room activity endpoint
 app.get("/api/rooms/activity", authMiddleware, (req, res) => {
   res.json(_getRoomActivityStats());
+});
+
+// ---- DAILY MISSIONS SYSTEM ----
+const DAILY_MISSIONS = [
+  { key: 'send_messages', name: '💬 Messenger', desc: 'Send 5 messages in any room or DM', target: 5, xp: 100, icon: '💬' },
+  { key: 'visit_rooms', name: '🚪 Explorer', desc: 'Visit 3 different rooms', target: 3, xp: 75, icon: '🚪' },
+  { key: 'make_friends', name: '🤝 Social Butterfly', desc: 'Add or match with 1 person', target: 1, xp: 150, icon: '🤝' }
+];
+
+async function _incrementMissionProgress(uid, mission_key, amount) {
+  try {
+    const dateId = new Date().toISOString().split('T')[0];
+    await pool.query(
+      `INSERT INTO user_mission_progress (user_id, mission_key, date_id, progress)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, mission_key, date_id) 
+       DO UPDATE SET progress = LEAST(user_mission_progress.progress + $4, 100)`,
+      [uid, mission_key, dateId, amount]
+    );
+  } catch (e) { console.error("Mission progress error", e); }
+}
+
+app.get("/api/missions/daily", authMiddleware, async (req, res) => {
+  try {
+    const dateId = new Date().toISOString().split('T')[0];
+    const { rows } = await pool.query("SELECT mission_key, progress, completed FROM user_mission_progress WHERE user_id = $1 AND date_id = $2", [req.uid, dateId]);
+    // Merge definitions with user progress
+    const missions = DAILY_MISSIONS.map(m => {
+      const userProgress = rows.find(r => r.mission_key === m.key);
+      return {
+        ...m,
+        progress: userProgress ? userProgress.progress : 0,
+        completed: userProgress ? userProgress.completed : false,
+        claimable: userProgress ? (userProgress.progress >= m.target && !userProgress.completed) : false
+      };
+    });
+    res.json({ missions, dateId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post("/api/missions/claim", authMiddleware, async (req, res) => {
+  try {
+    const { mission_key } = req.body;
+    const missionDef = DAILY_MISSIONS.find(m => m.key === mission_key);
+    if (!missionDef) return res.status(400).json({ error: "Unknown mission" });
+
+    const dateId = new Date().toISOString().split('T')[0];
+    const { rows } = await pool.query(
+      "UPDATE user_mission_progress SET completed = true WHERE user_id = $1 AND date_id = $2 AND mission_key = $3 AND progress >= $4 AND completed = false RETURNING *",
+      [req.uid, dateId, mission_key, missionDef.target]
+    );
+
+    if (rows.length) {
+      const xpGain = missionDef.xp;
+      await pool.query("UPDATE users SET xp = xp + $2 WHERE id = $1", [req.uid, xpGain]);
+      const userXP = await pool.query("SELECT xp FROM users WHERE id = $1", [req.uid]);
+      const xp = userXP.rows[0].xp;
+      const level = calculateLevel(xp);
+      const currentLevelXP = xpForLevel(level);
+      const nextLevelXP = xpForLevel(level + 1);
+
+      for (const [socketId, u] of connectedUsers.entries()) {
+        if (u.uid === req.uid) {
+          io.to(socketId).emit("xp_update", {
+            xp, level, gained: xpGain,
+            progress: Math.round(((xp - currentLevelXP) / (nextLevelXP - currentLevelXP)) * 100)
+          });
+        }
+      }
+      res.json({ ok: true, xpGain });
+    } else {
+      res.status(400).json({ error: "Mission not complete or already claimed" });
+    }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- RECOMMENDATIONS API (improved: excludes banned + inactive users) ----
+app.get("/api/users/recommendations", authMiddleware, async (req, res) => {
+  try {
+    const myTheriotype = (await pool.query("SELECT theriotype FROM users WHERE id = $1", [req.uid])).rows[0]?.theriotype;
+    const baseFilters = `WHERE id != $1 
+                 AND (is_banned = FALSE OR is_banned IS NULL)
+                 AND last_seen > NOW() - INTERVAL '30 days'
+                 AND id NOT IN (SELECT friend_id FROM friends WHERE user_id = $1)
+                 AND id NOT IN (SELECT to_uid FROM friend_requests WHERE from_uid = $1)`;
+    if (myTheriotype) {
+      const query = `SELECT id as uid, name, photo, theriotype, level FROM users 
+                 ${baseFilters}
+                 ORDER BY (theriotype = $2) DESC, RANDOM() LIMIT 5`;
+      const { rows } = await pool.query(query, [req.uid, myTheriotype]);
+      return res.json(rows);
+    }
+    const query = `SELECT id as uid, name, photo, theriotype, level FROM users 
+                 ${baseFilters}
+                 ORDER BY RANDOM() LIMIT 5`;
+    const { rows } = await pool.query(query, [req.uid]);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Start background timers

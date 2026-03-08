@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   auth TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS user_mission_progress (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mission_key TEXT NOT NULL,
+  date_id TEXT NOT NULL,
+  progress INTEGER DEFAULT 0,
+  completed BOOLEAN DEFAULT false,
+  PRIMARY KEY (user_id, mission_key, date_id)
+);
 `;
 
 pool.query(sql)

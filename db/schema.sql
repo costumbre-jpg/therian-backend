@@ -69,3 +69,12 @@ CREATE TABLE IF NOT EXISTS friend_requests (
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(from_uid, to_uid)
 );
+
+CREATE TABLE IF NOT EXISTS user_mission_progress (
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mission_key TEXT NOT NULL,
+  date_id     TEXT NOT NULL,
+  progress    INTEGER DEFAULT 0,
+  completed   BOOLEAN DEFAULT false,
+  PRIMARY KEY (user_id, mission_key, date_id)
+);
