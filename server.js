@@ -451,15 +451,16 @@ async function sendReportEmail(report) {
   } catch (e) { console.error("Email report error:", e.message); }
 }
 
-// ---- VAPID KEYS (from env vars, not regenerated) ----
-const VAPID_PUBLIC_KEY = (process.env.VAPID_PUBLIC_KEY || "").trim();
-const VAPID_PRIVATE_KEY = (process.env.VAPID_PRIVATE_KEY || "").trim();
+// ---- VAPID KEYS ----
+// Generated specifically for QIURE push notifications
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "M0Rpy1yx68S7IOSV_GkOwOQuTxmxP8BCQzyRo2aWBJE8hZc0wjYNTdQ6eeKFREMcmJ9X-ANGOpOjf8FRrp11umAM";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "rHNzW0Nc0F3e_eqVcI6Ir9IAyLrfVvLo2CdFgSl-jZc";
 let vapidConfigured = false;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   try {
     webpush.setVapidDetails(
-      "mailto:admin@therianworld.netlify.app",
+      "mailto:admin@qiure.com",
       VAPID_PUBLIC_KEY,
       VAPID_PRIVATE_KEY
     );
@@ -467,11 +468,30 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
     console.log("OK VAPID keys configured");
   } catch (err) {
     console.error("ERROR VAPID keys invalid (push disabled):", err.message);
-    console.error("Make sure you copied the keys without extra spaces or quotes.");
   }
 } else {
-  console.warn("WARN: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY not configured. Push notifications disabled.");
+  console.warn("WARN: VAPID keys missing. Push disabled.");
 }
+
+// ---- PUSH SUBSCRIBE ENDPOINT ----
+app.post("/api/push/subscribe", authMiddleware, async (req, res) => {
+  try {
+    const { endpoint, keys } = req.body;
+    if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+      return res.status(400).json({ error: "Invalid subscription object" });
+    }
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) 
+       VALUES ($1, $2, $3, $4) 
+       ON CONFLICT (user_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4`,
+      [req.uid, endpoint, keys.p256dh, keys.auth]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Push subscribe error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ---- PUSH NOTIFICATION HELPERS ----
 async function sendPushToUser(recipientUid, title, body) {
