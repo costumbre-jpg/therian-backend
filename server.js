@@ -453,8 +453,8 @@ async function sendReportEmail(report) {
 
 // ---- VAPID KEYS ----
 // Generated specifically for QIURE push notifications
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "M0Rpy1yx68S7IOSV_GkOwOQuTxmxP8BCQzyRo2aWBJE8hZc0wjYNTdQ6eeKFREMcmJ9X-ANGOpOjf8FRrp11umAM";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "rHNzW0Nc0F3e_eqVcI6Ir9IAyLrfVvLo2CdFgSl-jZc";
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "BDAT2LqYEGay5mKa98QffvGvXIOh66P2Ys90Qnj6yexuW9JjWebMMn-foz3opqx07SoveiC666g5IElvZSje290";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "bYU5YJHro41o9cRa3sas3k8ezibwp2tk0IpQH490T1c";
 let vapidConfigured = false;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
