@@ -1444,6 +1444,9 @@ io.on("connection", (socket) => {
         text: rows[0].text, created_at: rows[0].created_at,
         reply_to: replyId, reply: replyData
       });
+      // Notify offline/inactive users in this room via Web Push
+      sendPushToRoom(roomId, user.uid, user.name + ": " + rows[0].text);
+
       // Track room activity + award XP (with daily cap)
       _trackRoomMessage(roomId);
       _roomLastActivity.set(roomId, Date.now());
