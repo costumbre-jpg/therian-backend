@@ -38,7 +38,9 @@ const VALID_ROOMS = [
   // Prog World
   "prog_languages", "prog_web", "prog_mobile", "prog_databases", "prog_ai", "prog_devops", "prog_security",
   // Anime World
-  "anime_shonen", "anime_shojo", "anime_seinen", "anime_isekai", "anime_mecha", "anime_sliceoflife", "anime_otaku"
+  "anime_shonen", "anime_shojo", "anime_seinen", "anime_isekai", "anime_mecha", "anime_sliceoflife", "anime_otaku",
+  // Hub (QIURE Server Hub)
+  "hub_software", "hub_design", "hub_business", "hub_music", "hub_mentors"
 ];
 
 // ---- POSTGRESQL ----
@@ -374,7 +376,14 @@ const ICEBREAKER_QUESTIONS = {
   prog_databases: ["🗄️ SQL or NoSQL?", "🗄️ Favorite database?", "🗄️ Have you ever lost data? Tell the story."],
   prog_ai: ["🤖 Is AI going to replace programmers?", "🤖 Coolest AI project you've seen?", "🤖 ChatGPT, Claude, or Gemini?"],
   prog_devops: ["⚙️ Docker or Kubernetes?", "⚙️ CI/CD pipeline tips?", "⚙️ Worst deployment disaster?"],
-  prog_security: ["🔐 Have you ever been hacked?", "🔐 Best security practice?", "🔐 Ethical hacking — have you tried it?"]
+  prog_security: ["🔐 Have you ever been hacked?", "🔐 Best security practice?", "🔐 Ethical hacking — have you tried it?"],
+
+  // Hub world
+  hub_software: ["💻 What are you building right now?", "💻 Favorite IDE and why?", "💻 What was the hardest bug you ever fixed?", "💻 Frontend or backend — which do you enjoy more?"],
+  hub_design: ["🎨 Figma, Sketch, or Adobe XD?", "🎨 What design trend do you love right now?", "🎨 Show us something you designed recently!", "🎨 UX or UI — where's your passion?"],
+  hub_business: ["🚀 What's your startup idea?", "🚀 Best business book you've read?", "🚀 Solo founder or co-founder — what's better?", "🚀 What problem needs solving right now?"],
+  hub_music: ["🎵 What are you producing right now?", "🎵 DAW of choice?", "🎵 Favorite plugin or VST?", "🎵 How did you get into music production?"],
+  hub_mentors: ["🧠 What's the best advice you've ever received?", "🧠 What skill do you wish you learned earlier?", "🧠 Who's your biggest inspiration?", "🧠 What would you teach someone starting out?"]
 };
 
 const _roomLastActivity = new Map(); // roomId → timestamp
@@ -453,8 +462,8 @@ async function sendReportEmail(report) {
 
 // ---- VAPID KEYS ----
 // Generated specifically for QIURE push notifications
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "BDAT2LqYEGay5mKa98QffvGvXIOh66P2Ys90Qnj6yexuW9JjWebMMn-foz3opqx07SoveiC666g5IElvZSje290";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "bYU5YJHro41o9cRa3sas3k8ezibwp2tk0IpQH490T1c";
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
 let vapidConfigured = false;
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -1233,6 +1242,27 @@ app.delete("/api/messages/:msgId", authMiddleware, async (req, res) => {
       return res.json({ ok: true });
     }
     res.status(404).json({ error: "Message not found" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================
+// FOCUS SESSION ENDPOINT
+// ============================================================
+app.post("/api/focus/complete", authMiddleware, async (req, res) => {
+  try {
+    const { duration } = req.body; // duration in minutes
+    if (!duration || duration < 25) return res.status(400).json({ error: "Minimum focus session is 25 minutes" });
+    // Award XP based on duration: 25min=50XP, 45min=100XP, 60min=150XP
+    let xpGain = 50;
+    if (duration >= 60) xpGain = 150;
+    else if (duration >= 45) xpGain = 100;
+    await _awardXP(req.uid, xpGain, null, false);
+    // Track mission progress
+    _incrementMissionProgress(req.uid, 'focus_sessions', 1);
+    const userXP = await pool.query("SELECT xp FROM users WHERE id = $1", [req.uid]);
+    const xp = userXP.rows[0]?.xp || 0;
+    const level = calculateLevel(xp);
+    res.json({ ok: true, xpGain, xp, level });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
